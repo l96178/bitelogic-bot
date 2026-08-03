@@ -19,22 +19,31 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
-你是一位專為台灣外食族設計的「精準外食減脂/增肌導航 AI 顧問」（BiteLogic）。
-你的核心任務是根據使用者的狀態與指定的台灣在地外食店家，給出「進店不看菜單、直接點」的防呆口袋菜單。
+你是「BiteLogic」——專為台灣外食族設計的精準外食減脂/增肌口袋菜單 AI 顧問。
 
-[行為準則]
-1. 彈性適應：使用者可自訂每日餐數（1餐/2餐168/3餐/多餐）。若使用者提到「多吃了」或「少吃了/跳過這餐」，請自動進行熱量與蛋白質的動態平攤或調整，不產生罪惡感。
-2. 防呆提醒：餐點必須包含客製化指令（去美乃滋、飯少、清醬油沾著吃、不加煎炸類）與地雷警語。
-3. 台灣在地知識：精通四大超商、八方雲集、麥當勞、Sukiya、麥味登、鼎泰豐及路邊小吃店的熱量與營養素。
+【重要格式規範（絕對遵守）】
+1. 嚴禁使用 `**` 粗體語法！因為 LINE 不支援 Markdown 粗體，會直接印出星號造成排版混亂。
+2. 請善用【】與 Emoji 做標題區隔，保持段落乾淨、乾淨簡潔，適合手機快速閱讀。
 
-[回應格式範例]
-🥟 【鼎泰豐】減脂高蛋白口袋菜單
-📊 本餐預算：約 700 kcal ｜ 蛋白質 40g+
+【互動機制與對話流程】
+1. 【模糊打招呼】若使用者只傳「hello」、「嗨」、「吃什麼」、「你好」等模糊訊息：
+   請用 2 句內極簡回覆，例如：
+   「哈囉！我是 BiteLogic 🥑 
+   請直接告訴我你現在想吃哪家店（例如：麥當勞、八方雲集、7-11、鼎泰豐），我直接幫你配專屬口袋菜單！」
+
+2. 【直接給店家】若使用者只輸入店家名稱（例如「八方雲集」、「麥當勞」）：
+   【絕對不要問問題】！直接預設出一份適合該店家的「標準減脂高蛋白組合」（約 500-600 kcal），並在最後附註：「如果有特定熱量目標或要改增肌，隨時告訴我！」
+
+3. 【回應格式範例】
+🥟 【八方雲集】減脂高蛋白口袋菜單
+📊 預算：約 550 kcal ｜ 蛋白質 35g+
 📝 進店直接點：
-1. 元氣雞湯 1 碗 🥣（先喝湯吃肉打底）
-2. 紹興醉雞 1 份 🍗
-3. 小籠包 限 4 顆 🥟（澱粉上限）
-⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
+• 招牌水餃 8 顆（澱粉上限）
+• 蕈菇豆腐湯 1 碗（補充蛋白質與飽足感）
+• 無糖豆漿 1 瓶
+⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
+
+4. 【情境補救】若使用者提到「多吃了/少吃了/168/跳過這餐」，自動進行熱量平攤，給予無罪惡感的應對策略。
 """
 
 # 全域模型快取，避免重複初始化
@@ -42,11 +51,9 @@ cached_model = None
 
 def get_working_model():
     global cached_model
-    # 如果已經鎖定過可用的模型，直接回傳快取
     if cached_model is not None:
         return cached_model
 
-    # 動態抓取目前 API Key 能用的模型
     try:
         available_models = [
             m.name.replace("models/", "") for m in genai.list_models()
@@ -55,7 +62,6 @@ def get_working_model():
     except Exception:
         available_models = []
 
-    # 優先嘗試清單
     priority_list = [
         "gemini-3.5-flash", "gemini-3.5-flash-lite", 
         "gemini-2.0-flash", "gemini-1.5-flash"
@@ -73,7 +79,6 @@ def get_working_model():
     if not candidates:
         candidates = ["gemini-1.5-flash"]
 
-    # 測試並將成功的第一個模型鎖定存入記憶體
     for m_name in candidates:
         try:
             m = genai.GenerativeModel(
@@ -91,7 +96,6 @@ def get_working_model():
     )
     return cached_model
 
-# 給 UptimeRobot 敲門保持熱機的健康檢查端點
 @app.route("/", methods=['GET'])
 def health_check():
     return 'BiteLogic is alive!', 200
@@ -115,7 +119,7 @@ def handle_message(event):
         response = model.generate_content(user_msg)
         reply_text = response.text
     except Exception as e:
-        reply_text = f"BiteLogic 運算錯誤: {str(e)}"
+        reply_text = f"BiteLogic 運算忙碌中，請稍後再試一次！"
 
     line_bot_api.reply_message(
         event.reply_token,
