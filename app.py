@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -23,31 +24,26 @@ SYSTEM_PROMPT = """
 
 【重要格式規範（絕對遵守）】
 1. 嚴禁使用 `**` 粗體語法！因為 LINE 不支援 Markdown 粗體，會直接印出星號造成排版混亂。
-2. 請善用【】與 Emoji 做標題區隔，保持段落乾淨、乾淨簡潔，適合手機快速閱讀。
+2. 請善用【】與 Emoji 做標題區隔，保持段落乾淨簡潔，適合手機快速閱讀。
 
-【互動機制與對話流程】
-1. 【模糊打招呼】若使用者只傳「hello」、「嗨」、「吃什麼」、「你好」等模糊訊息：
-   請用 2 句內極簡回覆，例如：
-   「哈囉！我是 BiteLogic 🥑 
-   請直接告訴我你現在想吃哪家店（例如：麥當勞、八方雲集、7-11、鼎泰豐），我直接幫你配專屬口袋菜單！」
+【建檔與菜單邏輯】
+1. 【建檔確認】：當使用者提供身體數據（例如：180 / 105 / 男 / 減脂 / 兩餐168）時，請熱情確認並記錄：「檔案建立成功！已為你鎖定 [身高/體重/目標] 專屬檔案 🎯 今天想吃哪家店？（例如：麥當勞、八方雲集、鼎泰豐、7-11），直接告訴我！」
+2. 【精準菜單推播】：當使用者輸入店家名稱，請嚴格根據已建立的身體數據與熱量目標，計算出符合熱量與蛋白質需求的防呆口袋菜單。
+3. 【動態平攤補救】：若使用者提到「多吃了/少吃了/跳過這餐」，根據對話歷史中的目標，自動計算熱量與蛋白質動態平攤，給予無罪惡感的應對策略。
 
-2. 【直接給店家】若使用者只輸入店家名稱（例如「八方雲集」、「麥當勞」）：
-   【絕對不要問問題】！直接預設出一份適合該店家的「標準減脂高蛋白組合」（約 500-600 kcal），並在最後附註：「如果有特定熱量目標或要改增肌，隨時告訴我！」
-
-3. 【回應格式範例】
+【回應格式範例】
 🥟 【八方雲集】減脂高蛋白口袋菜單
-📊 預算：約 550 kcal ｜ 蛋白質 35g+
+📊 本餐預算：約 600 kcal ｜ 蛋白質 40g+
 📝 進店直接點：
 • 招牌水餃 8 顆（澱粉上限）
 • 蕈菇豆腐湯 1 碗（補充蛋白質與飽足感）
 • 無糖豆漿 1 瓶
 ⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
-
-4. 【情境補救】若使用者提到「多吃了/少吃了/168/跳過這餐」，自動進行熱量平攤，給予無罪惡感的應對策略。
 """
 
-# 全域模型快取，避免重複初始化
+# 全域快取與用戶狀態紀錄
 cached_model = None
+user_data = {}  # 格式: { user_id: { 'has_profile': False, 'chat': session } }
 
 def get_working_model():
     global cached_model
@@ -112,14 +108,58 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    user_id = event.source.user_id
     user_msg = event.message.text.strip()
 
-    try:
-        model = get_working_model()
-        response = model.generate_content(user_msg)
-        reply_text = response.text
-    except Exception as e:
-        reply_text = f"BiteLogic 運算忙碌中，請稍後再試一次！"
+    model = get_working_model()
+
+    # 若此用戶第一次發言，初始化資料結構
+    if user_id not in user_data:
+        user_data[user_id] = {
+            'has_profile': False,
+            'chat': model.start_chat(history=[])
+        }
+
+    user_info = user_data[user_id]
+    chat = user_info['chat']
+
+    # 1. 判斷是否尚未建立個人檔案
+    if not user_info['has_profile']:
+        # 檢查訊息是否包含身體數據關鍵字（數字 或 性別/目標詞彙）
+        has_numbers = bool(re.search(r'\d+', user_msg))
+        has_keywords = any(k in user_msg for k in ['減脂', '增肌', '男', '女', '斷食', '體重', '身高', 'kg', 'cm'])
+
+        if has_numbers or has_keywords:
+            # 判斷為用戶正在提供身體數據，丟給 AI 建檔並鎖定狀態
+            try:
+                response = chat.send_message(f"這是我的身體數據與個人檔案：{user_msg}")
+                reply_text = response.text
+                user_info['has_profile'] = True  # 建檔成功，解除鎖定！
+            except Exception:
+                reply_text = "建立檔案失敗，請再試一次！"
+        else:
+            # 未建檔且傳的不是數據 ➔ 強制攔截並引導建檔！
+            reply_text = (
+                "歡迎來到 BiteLogic 🥑！\n\n"
+                "首次使用請先花 3 秒建立你的專屬個人檔案 📝\n\n"
+                "請直接回覆以下資訊：\n"
+                "【身高 / 體重 / 性別 / 飲食目標】\n"
+                "（例如：180 / 105 / 男 / 減脂 / 一天吃兩餐）\n\n"
+                "完成建檔後即可解鎖專屬外食口袋菜單！"
+            )
+    else:
+        # 2. 已建檔用戶 ➔ 正常進行菜單對話
+        try:
+            response = chat.send_message(user_msg)
+            reply_text = response.text
+        except Exception:
+            try:
+                # 異常自動恢復機制
+                user_data[user_id]['chat'] = model.start_chat(history=[])
+                response = user_data[user_id]['chat'].send_message(f"請記住我的檔案數據並處理：{user_msg}")
+                reply_text = response.text
+            except Exception:
+                reply_text = "BiteLogic 運算忙碌中，請稍後再試一次！"
 
     line_bot_api.reply_message(
         event.reply_token,
