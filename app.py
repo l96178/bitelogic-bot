@@ -3,8 +3,7 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 app = Flask(__name__)
 
@@ -16,8 +15,8 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 初始化 Google GenAI Client
-client = genai.Client(api_key=GEMINI_API_KEY)
+# 設定 Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
 你是一位專為台灣外食族設計的「精準外食減脂/增肌導航 AI 顧問」（BiteLogic）。
@@ -38,6 +37,12 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
 """
 
+# 初始化經典 stability 穩定版模型
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=SYSTEM_PROMPT
+)
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -52,28 +57,11 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
 
-    # 自動備援模型清單：自動嘗試你帳號開通的 Flash 模型
-    candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-    reply_text = None
-    last_error = None
-
-    for model_name in candidate_models:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=user_msg,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                ),
-            )
-            reply_text = response.text
-            break  # 只要有一個成功就立刻跳出迴圈
-        except Exception as e:
-            last_error = e
-            continue
-
-    if not reply_text:
-        reply_text = f"BiteLogic 運算失敗: {str(last_error)}"
+    try:
+        response = model.generate_content(user_msg)
+        reply_text = response.text
+    except Exception as e:
+        reply_text = f"BiteLogic 運算失敗: {str(e)}"
 
     line_bot_api.reply_message(
         event.reply_token,
