@@ -37,6 +37,17 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
 """
 
+# 在伺服器啟動時，直接預先載入 AI 模型（不再每次訊息重新建立）
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    system_instruction=SYSTEM_PROMPT
+)
+
+# 新增健康檢查端點（給 UptimeRobot 測心跳防休眠用）
+@app.route("/", methods=['GET'])
+def health_check():
+    return 'BiteLogic is alive!', 200
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -51,47 +62,12 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
 
-    # 最新新版 API Key 正式支援的 Gemini 3 世代模型清單
-    candidate_models = [
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite"
-    ]
-
-    # 自動嘗試向後相容
     try:
-        fetched = [
-            m.name.replace("models/", "") for m in genai.list_models()
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        # 將最新的 3 世代模型排在最前面
-        fetched.sort(key=lambda name: ("3" in name), reverse=True)
-        for m_name in fetched:
-            if m_name not in candidate_models:
-                candidate_models.append(m_name)
-    except Exception:
-        pass
-
-    reply_text = None
-    last_err = ""
-
-    # 輪詢嘗試模型，直到成功取得回覆
-    for model_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=SYSTEM_PROMPT
-            )
-            response = model.generate_content(user_msg)
-            reply_text = response.text
-            if reply_text:
-                break
-        except Exception as e:
-            last_err = f"[{model_name}] {str(e)}"
-            continue
-
-    if not reply_text:
-        reply_text = f"BiteLogic 運算失敗: {last_err}"
+        # 直接使用預先載入好的 model，速度大幅提升！
+        response = model.generate_content(user_msg)
+        reply_text = response.text
+    except Exception as e:
+        reply_text = f"BiteLogic 運算忙碌中，請稍後再試一次！"
 
     line_bot_api.reply_message(
         event.reply_token,
