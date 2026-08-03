@@ -41,39 +41,44 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
 """
 
-user_data = {}  # 格式: { user_id: { 'has_profile': False, 'profile_str': '', 'chat': session } }
+# 用戶資料暫存字典
+user_data = {}  # 格式: { user_id: { 'has_profile': False, 'profile_str': '', 'chat': session, 'current_model': str } }
 
-def get_working_model():
-    """優先採用每日 1,500 次免費額度的主力模型，避開每日只有 20 次限額的 3.5 試用版"""
-    priority_list = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash"
-    ]
-    
-    try:
-        available_models = [
-            m.name.replace("models/", "") for m in genai.list_models()
-            if 'generateContent' in m.supported_generation_methods
-        ]
-    except Exception:
-        available_models = []
+# 完全免費版（Free Tier）能穩定運行的模型清單
+FREE_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
+]
 
-    for p in priority_list:
-        if p in available_models:
-            try:
-                return genai.GenerativeModel(
-                    model_name=p,
-                    system_instruction=SYSTEM_PROMPT
-                )
-            except Exception:
-                continue
+def send_with_fallback(user_info, prompt_text):
+    """跨模型發送訊息，若被 Google 限速或 limit:0，自動跳下一個模型處理"""
+    last_err = None
 
-    # 萬一都不在清單中，預設使用 2.0-flash
-    return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=SYSTEM_PROMPT
-    )
+    for model_name in FREE_MODELS:
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=SYSTEM_PROMPT
+            )
+            
+            # 若 Session 不存在或切換了模型，重新建構 Chat Session
+            if user_info.get('chat') is None or user_info.get('current_model') != model_name:
+                chat = model.start_chat(history=[])
+                # 若已建立過檔案，自動注入背景資訊
+                if user_info.get('has_profile') and user_info.get('profile_str'):
+                    chat.send_message(f"請記住我的身體數據與飲食習慣：{user_info['profile_str']}")
+                user_info['chat'] = chat
+                user_info['current_model'] = model_name
+
+            response = user_info['chat'].send_message(prompt_text)
+            return response.text
+        except Exception as e:
+            last_err = e
+            # 目前模型失敗，清空並嘗試下一個模型
+            user_info['chat'] = None
+            continue
+
+    raise last_err if last_err else Exception("所有免費模型均無法回應，請稍後再試！")
 
 @app.route("/", methods=['GET'])
 def health_check():
@@ -96,15 +101,14 @@ def handle_message(event):
 
     # 初始化用戶狀態
     if user_id not in user_data:
-        model = get_working_model()
         user_data[user_id] = {
             'has_profile': False,
             'profile_str': '',
-            'chat': model.start_chat(history=[])
+            'chat': None,
+            'current_model': None
         }
 
     user_info = user_data[user_id]
-    chat = user_info['chat']
 
     # 1. 未建檔使用者攔截
     if not user_info['has_profile']:
@@ -113,21 +117,11 @@ def handle_message(event):
 
         if has_numbers or has_keywords:
             try:
-                response = chat.send_message(f"這是我的身體數據與個人檔案：{user_msg}")
-                reply_text = response.text
+                reply_text = send_with_fallback(user_info, f"這是我的身體數據與個人檔案：{user_msg}")
                 user_info['has_profile'] = True
-                user_info['profile_str'] = user_msg  # 備份個人數據
+                user_info['profile_str'] = user_msg  # 備份數據
             except Exception as e:
-                # 萬一遇到模型額度問題，強制重置模型再試一次
-                try:
-                    fresh_model = get_working_model()
-                    user_info['chat'] = fresh_model.start_chat(history=[])
-                    response = user_info['chat'].send_message(f"這是我的身體數據與個人檔案：{user_msg}")
-                    reply_text = response.text
-                    user_info['has_profile'] = True
-                    user_info['profile_str'] = user_msg
-                except Exception as inner_e:
-                    reply_text = f"建檔失敗，錯誤原因: {str(inner_e)}"
+                reply_text = f"建檔失敗，錯誤原因: {str(e)}"
         else:
             reply_text = (
                 "歡迎來到 BiteLogic 🥑！\n\n"
@@ -140,18 +134,9 @@ def handle_message(event):
     else:
         # 2. 已建檔使用者對話
         try:
-            response = chat.send_message(user_msg)
-            reply_text = response.text
+            reply_text = send_with_fallback(user_info, user_msg)
         except Exception as e:
-            try:
-                fresh_model = get_working_model()
-                new_chat = fresh_model.start_chat(history=[])
-                new_chat.send_message(f"請記住我的身體數據與飲食習慣：{user_info['profile_str']}")
-                response = new_chat.send_message(user_msg)
-                user_info['chat'] = new_chat
-                reply_text = response.text
-            except Exception as inner_e:
-                reply_text = f"BiteLogic 運算失敗\n錯誤訊息: {str(inner_e)}"
+            reply_text = f"BiteLogic 運算失敗\n錯誤訊息: {str(e)}"
 
     line_bot_api.reply_message(
         event.reply_token,
