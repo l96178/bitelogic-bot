@@ -41,14 +41,16 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
 """
 
-cached_model = None
 user_data = {}  # 格式: { user_id: { 'has_profile': False, 'profile_str': '', 'chat': session } }
 
 def get_working_model():
-    global cached_model
-    if cached_model is not None:
-        return cached_model
-
+    """優先採用每日 1,500 次免費額度的主力模型，避開每日只有 20 次限額的 3.5 試用版"""
+    priority_list = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash"
+    ]
+    
     try:
         available_models = [
             m.name.replace("models/", "") for m in genai.list_models()
@@ -57,39 +59,21 @@ def get_working_model():
     except Exception:
         available_models = []
 
-    priority_list = [
-        "gemini-3.5-flash", "gemini-3.5-flash-lite", 
-        "gemini-2.0-flash", "gemini-1.5-flash"
-    ]
-    
-    candidates = []
     for p in priority_list:
         if p in available_models:
-            candidates.append(p)
-            
-    for a in available_models:
-        if a not in candidates:
-            candidates.append(a)
+            try:
+                return genai.GenerativeModel(
+                    model_name=p,
+                    system_instruction=SYSTEM_PROMPT
+                )
+            except Exception:
+                continue
 
-    if not candidates:
-        candidates = ["gemini-1.5-flash"]
-
-    for m_name in candidates:
-        try:
-            m = genai.GenerativeModel(
-                model_name=m_name,
-                system_instruction=SYSTEM_PROMPT
-            )
-            cached_model = m
-            return cached_model
-        except Exception:
-            continue
-
-    cached_model = genai.GenerativeModel(
-        model_name=candidates[0],
+    # 萬一都不在清單中，預設使用 2.0-flash
+    return genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
         system_instruction=SYSTEM_PROMPT
     )
-    return cached_model
 
 @app.route("/", methods=['GET'])
 def health_check():
@@ -110,10 +94,9 @@ def handle_message(event):
     user_id = event.source.user_id
     user_msg = event.message.text.strip()
 
-    model = get_working_model()
-
     # 初始化用戶狀態
     if user_id not in user_data:
+        model = get_working_model()
         user_data[user_id] = {
             'has_profile': False,
             'profile_str': '',
@@ -135,7 +118,16 @@ def handle_message(event):
                 user_info['has_profile'] = True
                 user_info['profile_str'] = user_msg  # 備份個人數據
             except Exception as e:
-                reply_text = f"建檔失敗，錯誤原因: {str(e)}"
+                # 萬一遇到模型額度問題，強制重置模型再試一次
+                try:
+                    fresh_model = get_working_model()
+                    user_info['chat'] = fresh_model.start_chat(history=[])
+                    response = user_info['chat'].send_message(f"這是我的身體數據與個人檔案：{user_msg}")
+                    reply_text = response.text
+                    user_info['has_profile'] = True
+                    user_info['profile_str'] = user_msg
+                except Exception as inner_e:
+                    reply_text = f"建檔失敗，錯誤原因: {str(inner_e)}"
         else:
             reply_text = (
                 "歡迎來到 BiteLogic 🥑！\n\n"
@@ -151,7 +143,6 @@ def handle_message(event):
             response = chat.send_message(user_msg)
             reply_text = response.text
         except Exception as e:
-            # 若對話過長或出錯，自動重新初始化 Session 並重新帶入檔案數據
             try:
                 fresh_model = get_working_model()
                 new_chat = fresh_model.start_chat(history=[])
