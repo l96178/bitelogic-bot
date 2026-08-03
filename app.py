@@ -37,12 +37,6 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
 """
 
-# 初始化經典 stability 穩定版模型
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=SYSTEM_PROMPT
-)
-
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -58,8 +52,26 @@ def handle_message(event):
     user_msg = event.message.text.strip()
 
     try:
-        response = model.generate_content(user_msg)
-        reply_text = response.text
+        # 1. 自動查詢你這個 API Key 目前有權限使用的模型清單
+        valid_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+
+        if not valid_models:
+            reply_text = "API Key 找不到可用的 Gemini 模型，請檢查 Google AI Studio 金鑰權限。"
+        else:
+            # 2. 自動選擇優先包含 'flash' 的模型，沒有的話自動用第一個可用模型
+            target_model = next((m for m in valid_models if 'flash' in m.lower()), valid_models[0])
+            
+            # 3. 動態載入模型生成內容
+            model = genai.GenerativeModel(
+                model_name=target_model,
+                system_instruction=SYSTEM_PROMPT
+            )
+            response = model.generate_content(user_msg)
+            reply_text = response.text
+
     except Exception as e:
         reply_text = f"BiteLogic 運算失敗: {str(e)}"
 
