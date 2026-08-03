@@ -52,18 +52,28 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
 
-    try:
-        # 改用標準穩定版 gemini-1.5-flash
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=user_msg,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-            ),
-        )
-        reply_text = response.text
-    except Exception as e:
-        reply_text = f"BiteLogic 運算錯誤: {str(e)}"
+    # 自動備援模型清單：自動嘗試你帳號開通的 Flash 模型
+    candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    reply_text = None
+    last_error = None
+
+    for model_name in candidate_models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                ),
+            )
+            reply_text = response.text
+            break  # 只要有一個成功就立刻跳出迴圈
+        except Exception as e:
+            last_error = e
+            continue
+
+    if not reply_text:
+        reply_text = f"BiteLogic 運算失敗: {str(last_error)}"
 
     line_bot_api.reply_message(
         event.reply_token,
