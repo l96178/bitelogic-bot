@@ -51,18 +51,31 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
 
-    # 現行最穩定的模型候選清單（按優先順序）
+    # 最新新版 API Key 正式支援的 Gemini 3 世代模型清單
     candidate_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash-8b"
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite"
     ]
+
+    # 自動嘗試向後相容
+    try:
+        fetched = [
+            m.name.replace("models/", "") for m in genai.list_models()
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        # 將最新的 3 世代模型排在最前面
+        fetched.sort(key=lambda name: ("3" in name), reverse=True)
+        for m_name in fetched:
+            if m_name not in candidate_models:
+                candidate_models.append(m_name)
+    except Exception:
+        pass
 
     reply_text = None
     last_err = ""
 
-    # 自動嘗試清單中的每一個模型，直到有一個成功運算為止
+    # 輪詢嘗試模型，直到成功取得回覆
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(
@@ -72,13 +85,13 @@ def handle_message(event):
             response = model.generate_content(user_msg)
             reply_text = response.text
             if reply_text:
-                break  # 成功產出回覆，立刻跳出迴圈！
+                break
         except Exception as e:
-            last_err = str(e)
-            continue  # 若遇到 404 或無權限，自動退回嘗試下一個模型
+            last_err = f"[{model_name}] {str(e)}"
+            continue
 
     if not reply_text:
-        reply_text = f"BiteLogic 運算失敗 (所有模型皆嘗試過): {last_err}"
+        reply_text = f"BiteLogic 運算失敗: {last_err}"
 
     line_bot_api.reply_message(
         event.reply_token,
