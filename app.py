@@ -51,29 +51,34 @@ def callback():
 def handle_message(event):
     user_msg = event.message.text.strip()
 
-    try:
-        # 1. 自動查詢你這個 API Key 目前有權限使用的模型清單
-        valid_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
+    # 現行最穩定的模型候選清單（按優先順序）
+    candidate_models = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash-8b"
+    ]
 
-        if not valid_models:
-            reply_text = "API Key 找不到可用的 Gemini 模型，請檢查 Google AI Studio 金鑰權限。"
-        else:
-            # 2. 自動選擇優先包含 'flash' 的模型，沒有的話自動用第一個可用模型
-            target_model = next((m for m in valid_models if 'flash' in m.lower()), valid_models[0])
-            
-            # 3. 動態載入模型生成內容
+    reply_text = None
+    last_err = ""
+
+    # 自動嘗試清單中的每一個模型，直到有一個成功運算為止
+    for model_name in candidate_models:
+        try:
             model = genai.GenerativeModel(
-                model_name=target_model,
+                model_name=model_name,
                 system_instruction=SYSTEM_PROMPT
             )
             response = model.generate_content(user_msg)
             reply_text = response.text
+            if reply_text:
+                break  # 成功產出回覆，立刻跳出迴圈！
+        except Exception as e:
+            last_err = str(e)
+            continue  # 若遇到 404 或無權限，自動退回嘗試下一個模型
 
-    except Exception as e:
-        reply_text = f"BiteLogic 運算失敗: {str(e)}"
+    if not reply_text:
+        reply_text = f"BiteLogic 運算失敗 (所有模型皆嘗試過): {last_err}"
 
     line_bot_api.reply_message(
         event.reply_token,
