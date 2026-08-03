@@ -37,13 +37,61 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
 """
 
-# 在伺服器啟動時，直接預先載入 AI 模型（不再每次訊息重新建立）
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=SYSTEM_PROMPT
-)
+# 全域模型快取，避免重複初始化
+cached_model = None
 
-# 新增健康檢查端點（給 UptimeRobot 測心跳防休眠用）
+def get_working_model():
+    global cached_model
+    # 如果已經鎖定過可用的模型，直接回傳快取
+    if cached_model is not None:
+        return cached_model
+
+    # 動態抓取目前 API Key 能用的模型
+    try:
+        available_models = [
+            m.name.replace("models/", "") for m in genai.list_models()
+            if 'generateContent' in m.supported_generation_methods
+        ]
+    except Exception:
+        available_models = []
+
+    # 優先嘗試清單
+    priority_list = [
+        "gemini-3.5-flash", "gemini-3.5-flash-lite", 
+        "gemini-2.0-flash", "gemini-1.5-flash"
+    ]
+    
+    candidates = []
+    for p in priority_list:
+        if p in available_models:
+            candidates.append(p)
+            
+    for a in available_models:
+        if a not in candidates:
+            candidates.append(a)
+
+    if not candidates:
+        candidates = ["gemini-1.5-flash"]
+
+    # 測試並將成功的第一個模型鎖定存入記憶體
+    for m_name in candidates:
+        try:
+            m = genai.GenerativeModel(
+                model_name=m_name,
+                system_instruction=SYSTEM_PROMPT
+            )
+            cached_model = m
+            return cached_model
+        except Exception:
+            continue
+
+    cached_model = genai.GenerativeModel(
+        model_name=candidates[0],
+        system_instruction=SYSTEM_PROMPT
+    )
+    return cached_model
+
+# 給 UptimeRobot 敲門保持熱機的健康檢查端點
 @app.route("/", methods=['GET'])
 def health_check():
     return 'BiteLogic is alive!', 200
@@ -63,11 +111,11 @@ def handle_message(event):
     user_msg = event.message.text.strip()
 
     try:
-        # 直接使用預先載入好的 model，速度大幅提升！
+        model = get_working_model()
         response = model.generate_content(user_msg)
         reply_text = response.text
     except Exception as e:
-        reply_text = f"BiteLogic 運算忙碌中，請稍後再試一次！"
+        reply_text = f"BiteLogic 運算錯誤: {str(e)}"
 
     line_bot_api.reply_message(
         event.reply_token,
