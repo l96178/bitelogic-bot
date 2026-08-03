@@ -16,7 +16,7 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 初始化 Google GenAI 新版 Client
+# 初始化 Google GenAI Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
@@ -53,7 +53,7 @@ def handle_message(event):
     user_msg = event.message.text.strip()
 
     try:
-        # 使用 Gemini 模型發送請求
+        # 使用 standard gemini-2.5-flash 模型發送請求
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=user_msg,
@@ -63,7 +63,8 @@ def handle_message(event):
         )
         reply_text = response.text
     except Exception as e:
-        reply_text = "BiteLogic 伺服器運算中，請稍後再試一次！"
+        # 將具體的 API 錯誤直接印在 LINE 上方便排查
+        reply_text = f"Gemini API 運算錯誤: {str(e)}"
 
     line_bot_api.reply_message(
         event.reply_token,
