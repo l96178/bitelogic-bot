@@ -3,7 +3,8 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
@@ -14,7 +15,9 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-genai.configure(api_key=GEMINI_API_KEY)
+
+# 初始化 Google GenAI 新版 Client
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
 你是一位專為台灣外食族設計的「精準外食減脂/增肌導航 AI 顧問」（BiteLogic）。
@@ -35,13 +38,6 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點排骨炒飯與紅油抄手！
 """
 
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=SYSTEM_PROMPT
-)
-
-user_sessions = {}
-
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -52,22 +48,22 @@ def callback():
         abort(400)
     return 'OK'
 
-@app.event_default
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_id = event.source.user_id
     user_msg = event.message.text.strip()
 
-    if user_id not in user_sessions:
-        user_sessions[user_id] = model.start_chat(history=[])
-
-    chat = user_sessions[user_id]
-
     try:
-        response = chat.send_message(user_msg)
+        # 使用 Gemini 模型發送請求
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=user_msg,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+            ),
+        )
         reply_text = response.text
     except Exception as e:
-        reply_text = f"BiteLogic 伺服器運算中，請稍後再試一次！"
+        reply_text = "BiteLogic 伺服器運算中，請稍後再試一次！"
 
     line_bot_api.reply_message(
         event.reply_token,
