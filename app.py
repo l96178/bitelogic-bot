@@ -53,9 +53,9 @@ def handle_message(event):
     user_msg = event.message.text.strip()
 
     try:
-        # 使用 standard gemini-2.5-flash 模型發送請求
+        # 改用標準穩定版 gemini-1.5-flash
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             contents=user_msg,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
@@ -63,8 +63,7 @@ def handle_message(event):
         )
         reply_text = response.text
     except Exception as e:
-        # 將具體的 API 錯誤直接印在 LINE 上方便排查
-        reply_text = f"Gemini API 運算錯誤: {str(e)}"
+        reply_text = f"BiteLogic 運算錯誤: {str(e)}"
 
     line_bot_api.reply_message(
         event.reply_token,
