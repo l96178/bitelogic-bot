@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import date
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -18,6 +19,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # 設定 Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
+
+# 🛡️ 安全防護設定：單一使用者每日提問上限
+MAX_DAILY_QUOTA = 10
 
 SYSTEM_PROMPT = """
 你是「BiteLogic」——專為台灣外食族設計的精準外食減脂/增肌口袋菜單 AI 顧問。
@@ -41,18 +45,17 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
 """
 
-# 用戶資料暫存字典
-user_data = {}  # 格式: { user_id: { 'has_profile': False, 'profile_str': '', 'chat': session, 'model_name': str } }
+# 用戶數據暫存
+user_data = {}  # 格式: { user_id: { 'has_profile': False, 'profile_str': '', 'chat': None, 'model_name': None, 'last_date': date, 'count': int } }
 
 def get_official_model_names():
-    """直接從 Google 伺服器取得當前 API Key 真正可用的官方完整模型名稱清單"""
+    """從 Google 伺服器取得當前 API Key 真正可用的官方完整模型清單"""
     try:
         valid_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                valid_models.append(m.name)  # 使用 Google 官方給予的完整名稱 (例: 'models/gemini-1.5-flash')
+                valid_models.append(m.name)
         
-        # 將 flash 模型排在前面（免費額度較高且速度快）
         flash_models = [m for m in valid_models if 'flash' in m.lower()]
         other_models = [m for m in valid_models if 'flash' not in m.lower()]
         
@@ -73,7 +76,6 @@ def execute_chat_message(user_info, prompt_text):
                 system_instruction=SYSTEM_PROMPT
             )
 
-            # 若用戶對話 session 不存在，或切換了模型，重置 Chat Session
             if user_info.get('chat') is None or user_info.get('model_name') != model_name:
                 chat = model.start_chat(history=[])
                 if user_info.get('has_profile') and user_info.get('profile_str'):
@@ -85,7 +87,6 @@ def execute_chat_message(user_info, prompt_text):
             return response.text
         except Exception as e:
             last_exception = e
-            # 若此模型失敗（例如被限速 429），清空 session 並嘗試下一個官方模型
             user_info['chat'] = None
             continue
 
@@ -109,17 +110,33 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     user_msg = event.message.text.strip()
+    today = date.today()
 
-    # 初始化用戶資料
+    # 初始化用戶資料與計數器
     if user_id not in user_data:
         user_data[user_id] = {
             'has_profile': False,
             'profile_str': '',
             'chat': None,
-            'model_name': None
+            'model_name': None,
+            'last_date': today,
+            'count': 0
         }
 
     user_info = user_data[user_id]
+
+    # 🛡️ 每日提問次數歸零與檢查邏輯
+    if user_info['last_date'] != today:
+        user_info['last_date'] = today
+        user_info['count'] = 0
+
+    if user_info['count'] >= MAX_DAILY_QUOTA:
+        reply_text = (
+            f"🥑 你今天的免費諮詢額度（{MAX_DAILY_QUOTA} 次）已經用完囉！\n\n"
+            "為了維護服務品質，請等明天凌晨自動重置後再來找 BiteLogic 諮詢菜單吧！"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
 
     # 1. 未建檔使用者攔截引導
     if not user_info['has_profile']:
@@ -131,6 +148,7 @@ def handle_message(event):
                 reply_text = execute_chat_message(user_info, f"這是我的身體數據與個人檔案：{user_msg}")
                 user_info['has_profile'] = True
                 user_info['profile_str'] = user_msg
+                user_info['count'] += 1  # 扣除一次額度
             except Exception as e:
                 reply_text = f"建檔失敗，請稍後再試一次！\n詳細原因: {str(e)}"
         else:
@@ -146,6 +164,7 @@ def handle_message(event):
         # 2. 已建檔使用者對話
         try:
             reply_text = execute_chat_message(user_info, user_msg)
+            user_info['count'] += 1  # 扣除一次額度
         except Exception as e:
             reply_text = f"BiteLogic 運算忙碌中，請稍後再試！\n詳細原因: {str(e)}"
 
