@@ -238,7 +238,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     try:
         # 改用官方推薦的 Interactions API 標準 call 方式
         interaction = client.interactions.create(
-            model="gemini-2.5-flash-lite",
+            model="gemini-3.1-flash-lite",
             input=prompt
         )
         res_text = interaction.text if hasattr(interaction, 'text') else str(interaction)
