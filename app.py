@@ -1,14 +1,14 @@
 import os
 import re
 import json
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, 
-    PostbackEvent, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction
+    PostbackEvent, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction, PostbackAction
 )
 import google.generativeai as genai
 from supabase import create_client, Client
@@ -43,7 +43,7 @@ SYSTEM_PROMPT = """
 """
 
 def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level, meal_pattern):
-    """加入男性 1500 / 女性 1200 kcal 衛福部與臨床安全熱量底線保護機制"""
+    """結合 BMR、TDEE 與健康底線保護機制的精準計算」"""
     weight = float(weight_kg) if weight_kg else 70.0
     height = float(height_cm) if height_cm else 170.0
     
@@ -57,11 +57,13 @@ def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level
 
     # PAL 活動係數計算
     if "重度" in str(activity_level):
+        pal = 1.725
+    elif "規律" in str(activity_level) or "運動" in str(activity_level):
         pal = 1.55
-    elif "站立" in str(activity_level) or "輕度" in str(activity_level):
+    elif "走動" in str(activity_level) or "輕度" in str(activity_level):
         pal = 1.375
     else:
-        pal = 1.2
+        pal = 1.2  # 久坐辦公
 
     tdee = bmr * pal
 
@@ -79,14 +81,14 @@ def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level
         target_cal = min(target_cal, int(weight * 20))
         max_protein = 180
     else:
-        target_cal = max(target_cal, min_safe_cal)  # 觸發健康安全底線
+        target_cal = max(target_cal, min_safe_cal)
         max_protein = 200
 
     target_protein = int(min(weight * 1.6, max_protein))
     return target_cal, target_protein
 
 def get_quick_reply(user_id=None):
-    """限制只撈最近 30 天紀錄，徹底避免 SQL 查詢暴增卡死"""
+    """限制只撈最近 30 天紀錄，避免 SQL 查詢暴增"""
     items = [
         QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里")),
         QuickReplyButton(action=MessageAction(label="⚙️ 修改個人檔案", text="修改檔案"))
@@ -259,14 +261,13 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
     }
     return flex_json
 
-def parse_profile_data(raw_text):
+def parse_basic_profile(raw_text):
+    """只解析第一階段的基本數據：身高、體重、性別、目標"""
     parsed = {}
-    
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
     if len(nums) >= 2:
         height_candidates = [n for n in nums if 50 <= n <= 250]
         weight_candidates = [n for n in nums if 20 <= n <= 300]
-        
         if height_candidates:
             parsed["height_cm"] = height_candidates[0]
         if weight_candidates:
@@ -274,29 +275,16 @@ def parse_profile_data(raw_text):
             if weights:
                 parsed["weight_kg"] = weights[0]
 
-    if "男" in raw_text: parsed["gender"] = "男"
-    elif "女" in raw_text: parsed["gender"] = "女"
+    parsed["gender"] = "女" if "女" in raw_text else "男"
     
     if "增肌" in raw_text and "減脂" in raw_text:
         parsed["goal"] = "增肌減脂"
     elif "增肌" in raw_text:
         parsed["goal"] = "增肌"
-    elif "減脂" in raw_text:
+    else:
         parsed["goal"] = "減脂"
 
-    if "重度" in raw_text or "勞動" in raw_text:
-        parsed["activity_level"] = "重度勞動"
-    elif "站立" in raw_text or "走動" in raw_text:
-        parsed["activity_level"] = "輕度走動"
-    else:
-        parsed["activity_level"] = "久坐辦公室"
-
-    if any(k in raw_text for k in ["168", "兩餐", "2餐", "斷食"]):
-        parsed["meal_pattern"] = "168斷食(一天兩餐)"
-    else:
-        parsed["meal_pattern"] = "一天三餐"
-
-    return parsed
+    return parsed if (parsed.get("height_cm") and parsed.get("weight_kg")) else None
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
@@ -363,10 +351,9 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
         return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
-    """【漏洞 4 第一與第二防線】：Prompt 限制 10 字內 + Python 切割[:15]，絕不讓 LINE 按鈕失效"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
-    safe_title = title[:15]  # 第二防線：字數安全截斷
+    safe_title = title[:15]
     
     budget = data.get("budget", "符合個人每日熱量控制")
     items = data.get("items", [])
@@ -435,36 +422,7 @@ def get_user_profile(line_user_id):
     res = supabase.table("profiles").select("id, raw_profile_text, height_cm, weight_kg, gender, goal").eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
-def save_user_profile(line_user_id, raw_text):
-    """【漏洞 6 防禦】：強制檢查必須有身高與體重，否則退回重新輸入"""
-    parsed = parse_profile_data(raw_text)
-    height = parsed.get("height_cm")
-    weight = parsed.get("weight_kg")
-    gender = parsed.get("gender", "男")
-    goal = parsed.get("goal", "減脂")
-    activity = parsed.get("activity_level", "久坐辦公室")
-    meal_pattern = parsed.get("meal_pattern", "一天三餐")
-
-    if not height or not weight:
-        return False, "⚠️ 無法完全辨識您的身高與體重！請務必包含數字（例如：173 / 85 / 男 / 減脂 / 久坐辦公室 / 168斷食）", None, None, None
-
-    full_profile_text = f"{raw_text} ｜ {activity} ｜ {meal_pattern}"
-
-    payload = {
-        "line_user_id": line_user_id,
-        "raw_profile_text": full_profile_text,
-        "height_cm": height,
-        "weight_kg": weight,
-        "gender": gender,
-        "goal": goal
-    }
-    supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
-    
-    target_cal, target_protein = calculate_precise_targets(weight, height, gender, goal, activity, meal_pattern)
-    return True, full_profile_text, weight, target_cal, target_protein
-
 def delete_last_meal(user_id):
-    """【漏洞 3 防禦】：提供撤銷最後一筆紀錄的功能"""
     today = get_today_str()
     log_res = supabase.table("daily_logs").select("id, total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
     if not log_res.data:
@@ -562,8 +520,9 @@ def callback():
 def handle_postback(event):
     line_user_id = event.source.user_id
     data = parse_qs(event.postback.data)
-    
     action = data.get("action", [""])[0]
+
+    # 一鍵紀錄餐點
     if action == "log_meal":
         restaurant = data.get("restaurant", ["外食"])[0]
         title = data.get("title", ["精準餐點"])[0]
@@ -572,18 +531,13 @@ def handle_postback(event):
         
         profile = get_user_profile(line_user_id)
         if profile:
-            intent_data = {
-                "restaurant": restaurant,
-                "food_name": title,
-                "calories": cal,
-                "protein_g": protein
-            }
+            intent_data = {"restaurant": restaurant, "food_name": title, "calories": cal, "protein_g": protein}
             food, c, p, total_c, total_p = log_meal_to_supabase(profile["id"], intent_data)
             
-            p_parsed = parse_profile_data(profile.get("raw_profile_text", ""))
+            p_text = profile.get("raw_profile_text", "")
             target_cal, target_protein = calculate_precise_targets(
                 profile.get("weight_kg"), profile.get("height_cm"), profile.get("gender"), 
-                profile.get("goal"), p_parsed.get("activity_level"), p_parsed.get("meal_pattern")
+                profile.get("goal"), p_text, p_text
             )
 
             last_info = {"food": food, "cal": c, "protein": p}
@@ -595,6 +549,61 @@ def handle_postback(event):
             )
             line_bot_api.reply_message(event.reply_token, flex_message)
 
+    # 步驟二：點選「活動程度」➔ 詢問「飲食模式」
+    elif action == "step_activity":
+        h = data.get("h", ["170"])[0]
+        w = data.get("w", ["70"])[0]
+        g = data.get("g", ["男"])[0]
+        goal = data.get("goal", ["減脂"])[0]
+        act = data.get("act", ["久坐辦公"])[0]
+
+        q_items = [
+            QuickReplyButton(action=PostbackAction(label="🍽️ 一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
+            QuickReplyButton(action=PostbackAction(label="⏳ 168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
+        ]
+        
+        reply_text = f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】："
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=q_items)))
+
+    # 步驟三：點選「飲食模式」➔ 完成建檔寫入 Supabase
+    elif action == "step_meal":
+        h = float(data.get("h", [170])[0])
+        w = float(data.get("w", [70])[0])
+        g = data.get("g", ["男"])[0]
+        goal = data.get("goal", ["減脂"])[0]
+        act = data.get("act", ["久坐辦公"])[0]
+        meal = data.get("meal", ["一天三餐"])[0]
+
+        full_profile_text = f"身高{h}cm / 體重{w}kg / {g} / {goal} / {act} / {meal}"
+
+        payload = {
+            "line_user_id": line_user_id,
+            "raw_profile_text": full_profile_text,
+            "height_cm": h,
+            "weight_kg": w,
+            "gender": g,
+            "goal": goal
+        }
+        supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
+        
+        target_cal, target_protein = calculate_precise_targets(w, h, g, goal, act, meal)
+        new_profile = get_user_profile(line_user_id)
+
+        reply_text = (
+            f"🎉 【專屬健康檔案建檔成功】\n\n"
+            f"🎯 目標模式：{goal}\n"
+            f"🏃 活動程度：{act}\n"
+            f"🍽️ 飲食習慣：{meal}\n\n"
+            f"📊 您的每日精準控制目標：\n"
+            f"• 建議總熱量：約 {target_cal} kcal / 日\n"
+            f"• 建議蛋白質：約 {target_protein} g / 日\n\n"
+            f"💡 直接輸入想吃的餐廳（如：麥當勞、7-11）即可獲取口袋菜單！"
+        )
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None))
+        )
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     line_user_id = event.source.user_id
@@ -602,124 +611,117 @@ def handle_message(event):
 
     profile = get_user_profile(line_user_id)
 
-    # 【漏洞 2 防禦】：處理用戶發起重新建檔的命令
     if user_msg == "修改檔案" or user_msg == "重新建檔":
         reply_text = (
             "⚙️ 【重新建立專屬健康檔案】\n\n"
-            "請直接回覆最新數據：\n"
-            "【身高 / 體重 / 性別 / 飲食目標 / 活動程度 / 飲食習慣】\n\n"
-            "💡 範例：173 / 85 / 男 / 增肌減脂 / 久坐辦公室 / 168斷食"
+            "請直接回覆第一階段基本數據：\n"
+            "【身高 / 體重 / 性別 / 飲食目標】\n\n"
+            "💡 範例：173 / 85 / 男 / 增肌減脂"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
 
-    if not profile or "重新建檔" in user_msg or (any(k in user_msg for k in ['cm', 'kg', '久坐', '辦公室', '斷食']) and len(re.findall(r'\d+', user_msg)) >= 2):
-        has_numbers = len(re.findall(r'\d+', user_msg)) >= 2
-        if has_numbers:
-            try:
-                is_success, raw_p_text, weight, target_cal, target_protein = save_user_profile(line_user_id, user_msg)
-                if is_success:
-                    p_parsed = parse_profile_data(raw_p_text)
-                    reply_text = (
-                        f"🎉 【專屬健康檔案更新成功】\n\n"
-                        f"🎯 目標模式：{p_parsed.get('goal', '減脂')}\n"
-                        f"🏃 活動程度：{p_parsed.get('activity_level', '久坐辦公室')}\n"
-                        f"🍽️ 飲食習慣：{p_parsed.get('meal_pattern', '一天三餐')}\n\n"
-                        f"📊 您的每日精準控制目標：\n"
-                        f"• 建議總熱量：約 {target_cal} kcal / 日\n"
-                        f"• 建議蛋白質：約 {target_protein} g / 日\n\n"
-                        f"💡 直接輸入想吃的餐廳（如：麥當勞、7-11）即可獲取口袋菜單！"
-                    )
-                    
-                    new_profile = get_user_profile(line_user_id)
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None))
-                    )
-                else:
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=raw_p_text))
-            except Exception as e:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"建檔失敗：{str(e)}"))
+    # 嘗試解析第一階段基本數據
+    basic_profile = parse_basic_profile(user_msg)
+
+    # 若未建檔或輸入全新身體數據 ➔ 啟動步驟一（選活動程度）
+    if not profile or basic_profile:
+        if basic_profile:
+            h = str(basic_profile["height_cm"])
+            w = str(basic_profile["weight_kg"])
+            g = basic_profile["gender"]
+            goal = basic_profile["goal"]
+
+            q_items = [
+                QuickReplyButton(action=PostbackAction(label="🪑 久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
+                QuickReplyButton(action=PostbackAction(label="🚶 時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
+                QuickReplyButton(action=PostbackAction(label="🏋️ 規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
+                QuickReplyButton(action=PostbackAction(label="🏗️ 重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
+            ]
+            reply_text = f"收到您的基本數據！\n({h}cm / {w}kg / {g} / {goal})\n\n下一步，請選擇您的【日常活動程度】："
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=q_items)))
+            return
         else:
             reply_text = (
                 "歡迎來到 BiteLogic 🥑！\n\n"
                 "首次使用請先建立專屬檔案 📝\n\n"
-                "請直接回覆：\n"
-                "【身高 / 體重 / 性別 / 飲食目標 / 活動程度 / 飲食習慣】\n\n"
-                "💡 範例：173 / 85 / 男 / 增肌減脂 / 久坐辦公室 / 168斷食"
+                "請直接回覆基本數據：\n"
+                "【身高 / 體重 / 性別 / 飲食目標】\n\n"
+                "💡 範例：173 / 85 / 男 / 增肌減脂"
             )
             quick_reply_demo = QuickReply(items=[
-                QuickReplyButton(action=MessageAction(label="📝 填寫範例A (久坐/三餐)", text="173 / 85 / 男 / 減脂 / 久坐辦公室 / 一天三餐")),
-                QuickReplyButton(action=MessageAction(label="📝 填寫範例B (168斷食)", text="173 / 85 / 男 / 增肌減脂 / 久坐辦公室 / 168斷食"))
+                QuickReplyButton(action=MessageAction(label="📝 填寫範例A", text="173 / 85 / 男 / 減脂")),
+                QuickReplyButton(action=MessageAction(label="📝 填寫範例B", text="173 / 85 / 男 / 增肌減脂"))
             ])
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply_demo))
-    else:
-        try:
-            user_id = profile["id"]
-            p_parsed = parse_profile_data(profile.get("raw_profile_text", ""))
-            
-            target_cal, target_protein = calculate_precise_targets(
-                profile.get("weight_kg"), profile.get("height_cm"), profile.get("gender"), 
-                profile.get("goal"), p_parsed.get("activity_level"), p_parsed.get("meal_pattern")
-            )
+            return
 
-            # 【漏洞 3 防禦】：執行刪除最新一筆紀錄
-            if user_msg == "刪除上一筆" or user_msg == "刪除紀錄":
-                del_msg = delete_last_meal(user_id)
-                cals, protein = get_today_summary(user_id)
-                summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    [TextSendMessage(text=del_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))]
-                )
-                return
+    # 已建檔狀況下的日常對話處理
+    try:
+        user_id = profile["id"]
+        p_text = profile.get("raw_profile_text", "")
+        
+        target_cal, target_protein = calculate_precise_targets(
+            profile.get("weight_kg"), profile.get("height_cm"), profile.get("gender"), 
+            profile.get("goal"), p_text, p_text
+        )
 
-            if user_msg == "查看今日卡路里":
-                cals, protein = get_today_summary(user_id)
-                summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
-                flex_message = FlexSendMessage(
-                    alt_text="BiteLogic 今日攝取進度",
-                    contents=summary_flex,
-                    quick_reply=get_quick_reply(user_id)
-                )
-                line_bot_api.reply_message(event.reply_token, flex_message)
-                return
-
-            today_stats = get_today_summary(user_id)
-            target_stats = (target_cal, target_protein)
-            ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, target_stats, user_msg)
-            msg_type = ai_res.get("type")
-
-            if msg_type == "log":
-                food, cal, protein, total_cal, total_protein = log_meal_to_supabase(user_id, ai_res)
-                last_info = {"food": food, "cal": cal, "protein": protein}
-                summary_flex = build_summary_flex_card(total_cal, target_cal, total_protein, target_protein, profile.get("goal"), last_logged_info=last_info)
-                flex_message = FlexSendMessage(
-                    alt_text=f"BiteLogic 紀錄成功：{food}",
-                    contents=summary_flex,
-                    quick_reply=get_quick_reply(user_id)
-                )
-                line_bot_api.reply_message(event.reply_token, flex_message)
-            elif msg_type == "recommendation":
-                flex_content = build_flex_card(ai_res)
-                flex_message = FlexSendMessage(
-                    alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單",
-                    contents=flex_content,
-                    quick_reply=get_quick_reply(user_id)
-                )
-                line_bot_api.reply_message(event.reply_token, flex_message)
-            else:
-                reply_text = ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集")
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
-                )
-
-        except Exception as e:
+        if user_msg == "刪除上一筆" or user_msg == "刪除紀錄":
+            del_msg = delete_last_meal(user_id)
+            cals, protein = get_today_summary(user_id)
+            summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply(profile.get("id")))
+                [TextSendMessage(text=del_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))]
             )
+            return
+
+        if user_msg == "查看今日卡路里":
+            cals, protein = get_today_summary(user_id)
+            summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
+            flex_message = FlexSendMessage(
+                alt_text="BiteLogic 今日攝取進度",
+                contents=summary_flex,
+                quick_reply=get_quick_reply(user_id)
+            )
+            line_bot_api.reply_message(event.reply_token, flex_message)
+            return
+
+        today_stats = get_today_summary(user_id)
+        target_stats = (target_cal, target_protein)
+        ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, target_stats, user_msg)
+        msg_type = ai_res.get("type")
+
+        if msg_type == "log":
+            food, cal, protein, total_cal, total_protein = log_meal_to_supabase(user_id, ai_res)
+            last_info = {"food": food, "cal": cal, "protein": protein}
+            summary_flex = build_summary_flex_card(total_cal, target_cal, total_protein, target_protein, profile.get("goal"), last_logged_info=last_info)
+            flex_message = FlexSendMessage(
+                alt_text=f"BiteLogic 紀錄成功：{food}",
+                contents=summary_flex,
+                quick_reply=get_quick_reply(user_id)
+            )
+            line_bot_api.reply_message(event.reply_token, flex_message)
+        elif msg_type == "recommendation":
+            flex_content = build_flex_card(ai_res)
+            flex_message = FlexSendMessage(
+                alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單",
+                contents=flex_content,
+                quick_reply=get_quick_reply(user_id)
+            )
+            line_bot_api.reply_message(event.reply_token, flex_message)
+        else:
+            reply_text = ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集")
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
+            )
+
+    except Exception as e:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply(profile.get("id")))
+        )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
