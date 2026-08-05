@@ -28,7 +28,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-# 超精簡 System Prompt（節省 Token 成本）
+# 精簡 System Prompt 降低 Token 耗費
 SYSTEM_PROMPT = "你是 BiteLogic 外食 AI 顧問。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
@@ -209,6 +209,7 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
+    # 使用最適低成本模型 gemini-2.5-flash-lite
     model = genai.GenerativeModel("gemini-2.5-flash-lite", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
@@ -382,7 +383,7 @@ def handle_postback(event):
             summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
-    # Step 2: 點選飲食目標 -> 選擇活動程度
+    # Step 2: 點選飲食目標 -> 引導選擇活動程度
     elif action == "step_goal":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
         goal = data.get("goal", ["減脂"])[0]
@@ -390,12 +391,12 @@ def handle_postback(event):
         q_items = [
             QuickReplyButton(action=PostbackAction(label="久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
             QuickReplyButton(action=PostbackAction(label="時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
-            QuickReplyButton(action=PostbackAction(label="重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動")),
             QuickReplyButton(action=PostbackAction(label="規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
+            QuickReplyButton(action=PostbackAction(label="重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
         ]
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已選擇飲食目標：【{goal}】\n\n請選擇您的【日常活動程度】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已選擇飲食目標：【{goal}】\n\n下一步，請選擇您的【日常活動程度】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
 
-    # Step 3: 點選活動程度 -> 選擇餐數
+    # Step 3: 點選活動程度 -> 引導選擇餐數
     elif action == "step_activity":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
         goal, act = data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0]
@@ -404,9 +405,9 @@ def handle_postback(event):
             QuickReplyButton(action=PostbackAction(label="一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
             QuickReplyButton(action=PostbackAction(label="168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
         ]
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已設定活動程度：【{act}】\n\n請選擇您的【飲食模式/餐數】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
 
-    # Step 4: 點選餐數 -> 建檔完成
+    # Step 4: 點選餐數 -> 計算目標並存檔
     elif action == "step_meal":
         h, w, a = float(data.get("h", [170])[0]), float(data.get("w", [70])[0]), float(data.get("a", [30])[0])
         g, goal_text, act, meal = data.get("g", ["男"])[0], data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0], data.get("meal", ["一天三餐"])[0]
@@ -447,7 +448,7 @@ def handle_message(event):
         if basic_profile:
             h, w, a, g = str(basic_profile["height_cm"]), str(basic_profile["weight_kg"]), str(basic_profile.get("age", 30)), basic_profile["gender"]
             
-            # Step 1 -> 引導選擇飲食目標 (Quick Reply)
+            # Step 1: 自動解析基礎數據後，彈出飲食目標按鈕選單
             q_items = [
                 QuickReplyButton(action=PostbackAction(label="健康減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "減脂"}), display_text="我選擇：健康減脂")),
                 QuickReplyButton(action=PostbackAction(label="精準增肌", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌"}), display_text="我選擇：精準增肌")),
@@ -509,6 +510,7 @@ def handle_message(event):
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null": update_last_restaurant_in_profile(user_id, raw_p_text, rec_store)
 
+            # 熱量額滿/超標：純文字攔截提示，不消耗多餘繪圖與卡片
             cals, _ = today_stats
             if cals >= target_cal:
                 store_display = rec_store if (rec_store and rec_store != "null") else "外食店家"
