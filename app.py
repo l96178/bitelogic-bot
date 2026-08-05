@@ -39,7 +39,6 @@ SYSTEM_PROMPT = """
 5. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
 """
 
-# 對齊 SQL 的 Goal 對照表
 GOAL_MAP_TO_DB = {
     "減脂": "fat_loss",
     "增肌": "muscle_gain",
@@ -58,6 +57,19 @@ def format_num(val):
         return int(f) if f.is_integer() else f
     except Exception:
         return val
+
+def extract_last_restaurant(raw_text):
+    if not raw_text:
+        return None
+    match = re.search(r'上次餐廳：([^\s｜]+)', raw_text)
+    return match.group(1).strip() if match else None
+
+def update_last_restaurant_in_profile(user_id, current_raw_text, store_name):
+    if not store_name or store_name == "null":
+        return
+    cleaned_text = re.sub(r'\s*｜\s*上次餐廳：[^\s｜]+', '', current_raw_text or '').strip()
+    new_raw_text = f"{cleaned_text} ｜ 上次餐廳：{store_name}"
+    supabase.table("profiles").update({"raw_profile_text": new_raw_text}).eq("id", user_id).execute()
 
 def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
     weight = float(weight_kg) if weight_kg else 70.0
@@ -310,7 +322,7 @@ def parse_basic_profile(raw_text):
 
     return parsed if (parsed.get("height_cm") and parsed.get("weight_kg")) else None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None):
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
@@ -324,6 +336,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
 
     prompt = f"""
     個人檔案：{profile_str}
+    【當前對話脈絡】：上一輪推薦的餐廳為「{last_restaurant or '無'}」
     今日已攝取：{cal} / {target_cal} kcal（正確剩餘：{rem_cal} kcal）
     蛋白質狀況：{protein} / {target_protein} g（正確還差：{rem_protein} g）
     用戶訊息："{user_msg}"
@@ -339,15 +352,18 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
         "protein_g": 蛋白質估計整數
     }}
 
-    情境 B：用戶在【詢問外食/餐廳推薦】（例如：7-11減脂推薦、麥當勞怎麼點）
-    【單餐健康目標】：請組合一套約 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap} g 的菜單！若額度尚有大幅缺口，請在 warning 提示用戶可於下午或運動後補充高蛋白飲品/豆漿。
+    情境 B：用戶在【詢問外食/餐廳推薦】或【對上一輪推薦發出口味/調整需求】
+    【關鍵對話規則】：
+    1. 若用戶訊息是在對上一輪推薦做口味或細節調整（例如：「我想吃辣的」、「有別的嗎」、「太貴了」、「換一個」），且上一輪有餐廳（{last_restaurant}），必須「優先沿用同一家餐廳（{last_restaurant}）」重新組合菜單！嚴禁跳到其他無關連鎖店（如 7-11）。
+    2. 若用戶明確提及新餐廳（如：八方雲集、麥當勞），則以新餐廳為主。
+
     {{
         "type": "recommendation",
-        "restaurant": "餐廳名稱",
-        "title": "菜單主題（必須精簡且控制在 10 個字以內！例如：麥當勞高蛋白組）",
+        "restaurant": "餐廳名稱（若屬調整則優先沿用 {last_restaurant}）",
+        "title": "菜單主題（必須精簡且控制在 10 個字以內！例如：麻辣鍋低卡吃法）",
         "budget": "說明（嚴禁提及價格！例如：單餐飽足目標 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap}g）",
         "items": ["餐點1", "餐點2", "餐點3"],
-        "warning": "地雷提醒與補充建議",
+        "warning": "地雷提醒與避坑建議",
         "total_cal": 這套組合的總熱量數字,
         "total_protein": 這套組合的總蛋白質數字
     }}
@@ -680,14 +696,13 @@ def handle_message(event):
         user_id = profile["id"]
         target_cal = profile.get("target_calories")
         target_protein = profile.get("target_protein_g")
+        raw_p_text = profile.get("raw_profile_text", "")
 
-        # 若舊用戶未存有目標，進行動態計算補齊
         if not target_cal or not target_protein:
-            p_text = profile.get("raw_profile_text", "")
             user_age = profile.get("age", 30)
             target_cal, target_protein = calculate_precise_targets(
                 profile.get("weight_kg"), profile.get("height_cm"), user_age, profile.get("gender"), 
-                profile.get("goal"), p_text, p_text
+                profile.get("goal"), raw_p_text, raw_p_text
             )
 
         if user_msg == "刪除上一筆" or user_msg == "刪除紀錄":
@@ -711,9 +726,12 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, flex_message)
             return
 
+        # 擷取上次推薦的餐廳名稱供 AI 當作上下文
+        last_restaurant = extract_last_restaurant(raw_p_text)
+
         today_stats = get_today_summary(user_id)
         target_stats = (target_cal, target_protein)
-        ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, target_stats, user_msg)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, target_stats, user_msg, last_restaurant=last_restaurant)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
@@ -727,6 +745,10 @@ def handle_message(event):
             )
             line_bot_api.reply_message(event.reply_token, flex_message)
         elif msg_type == "recommendation":
+            rec_store = ai_res.get("restaurant")
+            if rec_store and rec_store != "null":
+                update_last_restaurant_in_profile(user_id, raw_p_text, rec_store)
+
             flex_content = build_flex_card(ai_res)
             flex_message = FlexSendMessage(
                 alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單",
