@@ -209,7 +209,7 @@ def get_today_meals_list(user_id):
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
     # 使用最短、最穩定的標準模型名稱，避免任何截斷錯誤
-    model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=SYSTEM_PROMPT)
+    model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
     
