@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import traceback
 from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
@@ -208,8 +209,9 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
-    # 使用最短、最穩定的標準模型名稱，避免任何截斷錯誤
-    model = genai.GenerativeModel("gemini-3.5-flash-lite", system_instruction=SYSTEM_PROMPT)
+    # 使用 gemini-2.5-flash-lite，帶上完整的 models/ 路徑以利 SDK 識別
+    model_name = "models/gemini-2.5-flash-lite"
+    model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
     
@@ -239,7 +241,9 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         return json.loads(json_match.group(0)) if json_match else {"type": "chat", "reply_text": cleaned}
     except Exception as e:
-        return {"type": "chat", "reply_text": f"AI 連線失敗：{str(e)[:40]}"}
+        print("❌ Gemini API 完整報錯細節：")
+        print(traceback.format_exc())
+        return {"type": "chat", "reply_text": f"AI 連線失敗：{str(e)}"}
 
 def build_flex_card(data):
     restaurant = data.get("restaurant", "外食推薦")
@@ -518,6 +522,8 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集"), quick_reply=get_quick_reply(user_id)))
 
     except Exception as e:
+        print("❌ 處理訊息失敗系統 Log：")
+        print(traceback.format_exc())
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply(profile.get("id"))))
 
 if __name__ == "__main__":
