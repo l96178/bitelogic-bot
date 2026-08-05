@@ -39,6 +39,7 @@ SYSTEM_PROMPT = """
 2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 4. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
+5. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
 """
 
 def calculate_targets(weight_kg, goal):
@@ -100,7 +101,7 @@ def get_quick_reply(user_id=None):
     return QuickReply(items=items)
 
 def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, last_logged_info=None):
-    """通用進度卡片：修正蛋白質用語，並支援紀錄成功訊息混合顯示"""
+    """卡片 Header 完全移除 Emoji"""
     rem_cal = max(0, target_cal - cals)
     rem_protein = max(0, target_protein - protein)
 
@@ -216,7 +217,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
         {"type": "text", "text": "💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬菜單！", "size": "xs", "color": "#6B7280", "wrap": True}
     ])
 
-    title_text = "🎉 紀錄成功與今日進度" if last_logged_info else "📊 今日攝取總計與進度"
+    title_text = "紀錄成功與今日進度" if last_logged_info else "今日攝取總計與進度"
 
     flex_json = {
         "type": "bubble",
@@ -228,7 +229,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
             "paddingAll": "lg",
             "contents": [
                 {"type": "text", "text": title_text, "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"🎯 目前模式：{goal or '健康減脂'}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+                {"type": "text", "text": f"目前模式：{goal or '健康減脂'}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
             ]
         },
         "body": {
@@ -283,13 +284,19 @@ def parse_profile_data(raw_text):
 
     return parsed
 
-def process_ai_in_single_call(profile_str, today_stats, user_msg):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
+    """將精確的計算結果（包含剩餘量）直接傳給 Gemini，避免 AI 心算幻覺"""
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
+    target_cal, target_protein = target_stats
+    
+    rem_cal = max(0, target_cal - cal)
+    rem_protein = max(0, target_protein - protein)
     
     prompt = f"""
     個人檔案：{profile_str}
-    今日已攝取：{cal} kcal ｜ 蛋白質 {protein} g
+    今日熱量：{cal} / {target_cal} kcal（正確剩餘：{rem_cal} kcal）
+    蛋白質：{protein} / {target_protein} g（正確還差：{rem_protein} g）
     用戶訊息："{user_msg}"
 
     請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤）：
@@ -318,7 +325,7 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
     情境 C：用戶在【一般對話/問剩餘卡路里】（例如：你好、我今天還能吃多少）
     {{
         "type": "chat",
-        "reply_text": "精簡回答內容（150字以內）"
+        "reply_text": "精簡回答內容（150字以內。若提到剩餘熱量或蛋白質，必須完全照抄上述正確數字：熱量剩 {rem_cal} kcal、蛋白質差 {rem_protein} g）"
     }}
     """
     try:
@@ -338,7 +345,7 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
         return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
-    """菜單推薦卡片：移除酪梨 Icon、移除價格、開啟文字自動換行避免裁切"""
+    """菜單推薦卡片：Header 移除 Emoji，內文開啟換行防裁切"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
     budget = data.get("budget", "符合個人每日熱量控制")
@@ -355,7 +362,7 @@ def build_flex_card(data):
             "size": "sm",
             "color": "#555555",
             "margin": "xs",
-            "wrap": True  # 關鍵：開啟自動換行，防止名稱過長被切斷成 ...
+            "wrap": True
         })
 
     flex_json = {
@@ -586,14 +593,12 @@ def handle_message(event):
     else:
         try:
             user_id = profile["id"]
+            weight = profile.get("weight_kg") or 70.0
+            goal = profile.get("goal") or "減脂"
+            target_cal, target_protein = calculate_targets(weight, goal)
 
             if user_msg == "查看今日卡路里":
                 cals, protein = get_today_summary(user_id)
-                weight = profile.get("weight_kg") or 70.0
-                goal = profile.get("goal") or "減脂"
-                
-                target_cal, target_protein = calculate_targets(weight, goal)
-
                 summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, goal)
                 flex_message = FlexSendMessage(
                     alt_text="BiteLogic 今日攝取進度",
@@ -604,15 +609,12 @@ def handle_message(event):
                 return
 
             today_stats = get_today_summary(user_id)
-            ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, user_msg)
+            target_stats = (target_cal, target_protein)
+            ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, target_stats, user_msg)
             msg_type = ai_res.get("type")
 
             if msg_type == "log":
                 food, cal, protein, total_cal, total_protein = log_meal_to_supabase(user_id, ai_res)
-                weight = profile.get("weight_kg") or 70.0
-                goal = profile.get("goal") or "減脂"
-                target_cal, target_protein = calculate_targets(weight, goal)
-
                 last_info = {"food": food, "cal": cal, "protein": protein}
                 summary_flex = build_summary_flex_card(total_cal, target_cal, total_protein, target_protein, goal, last_logged_info=last_info)
                 flex_message = FlexSendMessage(
