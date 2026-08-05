@@ -209,6 +209,7 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
+    # 使用正確帶有 models/ 前綴的極致省錢模型
     model = genai.GenerativeModel("models/gemini-2.5-flash-lite", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
@@ -221,7 +222,6 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
-    # 修正 f-string 內的 JSON 括號轉義
     prompt = f"""
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
