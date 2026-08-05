@@ -75,39 +75,34 @@ def parse_profile_data(raw_text):
     """強健版建檔解析：優先 Python Regex 提取，失敗再備用 AI 處理"""
     parsed = {}
     
-    # 1. 先用 Regex 抓取數字（例如 180/105 或 180cm 105kg）
+    # 1. Regex 抓取數字
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
     if len(nums) >= 2:
-        # 尋找合理的 50~250 數字作為身高，20~300 作為體重
         height_candidates = [n for n in nums if 50 <= n <= 250]
         weight_candidates = [n for n in nums if 20 <= n <= 300]
         
         if height_candidates:
             parsed["height_cm"] = height_candidates[0]
         if weight_candidates:
-            # 取不同於身高的數字作為體重
             weights = [w for w in weight_candidates if w != parsed.get("height_cm")]
             if weights:
                 parsed["weight_kg"] = weights[0]
 
-    # 擷取性別與目標
     if "男" in raw_text: parsed["gender"] = "男"
     elif "女" in raw_text: parsed["gender"] = "女"
     
     if "增肌" in raw_text: parsed["goal"] = "增肌"
     elif "減脂" in raw_text: parsed["goal"] = "減脂"
 
-    # 若 Regex 成功解析出核心數值，立刻返回
     if parsed.get("height_cm") and parsed.get("weight_kg"):
         return parsed
 
-    # 2. 備用方案：若用戶寫長文，交給 Gemini 提取 JSON
+    # 2. 備用 AI 處理
     try:
         model = genai.GenerativeModel("gemini-3.5-flash")
         prompt = f'從以下文字擷取健康數據，僅輸出純 JSON："{raw_text}"。格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "減脂"}}'
         res = model.generate_content(prompt).text.strip()
         
-        # 嚴格只提取 {...} 區塊內容，防止 Markdown 廢話破壞 json.loads
         json_match = re.search(r'\{.*\}', res, re.DOTALL)
         if json_match:
             ai_data = json.loads(json_match.group(0))
@@ -244,12 +239,12 @@ def save_user_profile(line_user_id, raw_text):
         height_num = float(height) if height is not None else None
         weight_num = float(weight) if weight is not None else None
     except (ValueError, TypeError):
-        return False, "數據無法解析，請重新輸入合理的身體數據（例如：173 / 85 / 男 / 減脂）"
+        return False, "數據無法解析，請重新輸入合理的身體數據（例如：173 / 85 / 男 / 減脂）", None
 
     if not height_num or not (50 <= height_num <= 250):
-        return False, "身高數據不太對勁喔！請填寫 50 ~ 250 公分之間的數字。"
+        return False, "身高數據不太對勁喔！請填寫 50 ~ 250 公分之間的數字。", None
     if not weight_num or not (20 <= weight_num <= 300):
-        return False, "體重數據不太對勁喔！請填寫 20 ~ 300 公斤之間的數字。"
+        return False, "體重數據不太對勁喔！請填寫 20 ~ 300 公斤之間的數字。", None
 
     payload = {
         "line_user_id": line_user_id,
@@ -260,7 +255,7 @@ def save_user_profile(line_user_id, raw_text):
         "goal": parsed.get("goal")
     }
     supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
-    return True, "建檔成功"
+    return True, "建檔成功", weight_num
 
 def log_meal_to_supabase(user_id, intent_data):
     today = get_today_str()
@@ -376,12 +371,25 @@ def handle_message(event):
 
         if has_numbers or has_keywords:
             try:
-                is_success, msg = save_user_profile(line_user_id, user_msg)
+                is_success, msg, weight = save_user_profile(line_user_id, user_msg)
                 if is_success:
-                    reply_text = "專屬健康檔案建立成功！請點擊下方選單或直接輸入想吃的餐廳開始使用 🥑"
+                    weight_val = weight or 70.0
+                    target_cal = int(weight_val * 20)
+                    target_protein = int(weight_val * 1.5)
+
+                    reply_text = (
+                        f"🎉 【專屬健康檔案建檔成功】\n\n"
+                        f"📊 您的每日建議控制目標：\n"
+                        f"• 建議總熱量：約 {target_cal} kcal / 日\n"
+                        f"• 建議蛋白質：約 {target_protein} g / 日\n\n"
+                        f"💡 直接輸入想吃的餐廳（如：麥當勞、7-11、八方雲集）即可為您量身搭配外食菜單！"
+                    )
+                    
+                    # 重新取得剛建立好的用戶數據綁定選單
+                    new_profile = get_user_profile(line_user_id)
                     line_bot_api.reply_message(
                         event.reply_token,
-                        TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                        TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None))
                     )
                 else:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
