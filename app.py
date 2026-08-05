@@ -40,14 +40,38 @@ SYSTEM_PROMPT = """
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 """
 
-def get_quick_reply():
-    """產生對話框底部的常駐 Quick Reply 快捷按鈕"""
-    return QuickReply(items=[
-        QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里")),
-        QuickReplyButton(action=MessageAction(label="🏪 7-11 推薦", text="7-11 減脂推薦")),
-        QuickReplyButton(action=MessageAction(label="🥟 八方雲集", text="八方雲集減脂推薦")),
-        QuickReplyButton(action=MessageAction(label="🍔 麥當勞", text="麥當勞減脂推薦")),
-    ])
+def get_quick_reply(user_id=None):
+    """【動態生成選單】根據該用戶歷史最常吃的店家生成快捷按鈕，無紀錄則不顯示預設店家"""
+    items = [
+        QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里"))
+    ]
+    
+    if user_id:
+        try:
+            # 從 Supabase 查詢該用戶過去紀錄過的所有餐點
+            res = supabase.table("daily_logs").select("id").eq("user_id", user_id).execute()
+            if res.data:
+                log_ids = [r["id"] for r in res.data]
+                meals = supabase.table("meal_items").select("food_name").in_("daily_log_id", log_ids).execute()
+                
+                if meals.data:
+                    # 分析並統計用戶最常出現的店家前綴名稱
+                    freq = {}
+                    for m in meals.data:
+                        raw_name = m["food_name"]
+                        # 擷取店家名稱（例："八方雲集-精準控卡" 拆出 "八方雲集"）
+                        store_name = raw_name.split("-")[0].split(" ")[0].strip()
+                        if len(store_name) >= 2:
+                            freq[store_name] = freq.get(store_name, 0) + 1
+                    
+                    # 取出次數最高的前 3 名店家
+                    top_stores = sorted(freq, key=freq.get, reverse=True)[:3]
+                    for store in top_stores:
+                        items.append(QuickReplyButton(action=MessageAction(label=f"🍽️ {store}", text=f"{store}推薦")))
+        except Exception:
+            pass
+
+    return QuickReply(items=items)
 
 def parse_profile_data(raw_text):
     """解析使用者輸入的健康數據"""
@@ -66,7 +90,7 @@ def parse_profile_data(raw_text):
         return {}
 
 def process_ai_in_single_call(profile_str, today_stats, user_msg):
-    """【極速優化】單次呼叫 Gemini，同步完成意圖判斷與內容生成"""
+    """單次呼叫 Gemini 處理意圖與生成回應"""
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     
@@ -177,7 +201,7 @@ def get_today_str():
     return datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d")
 
 def get_user_profile(line_user_id):
-    res = supabase.table("profiles").select("id, raw_profile_text").eq("line_user_id", line_user_id).execute()
+    res = supabase.table("profiles").select("id, raw_profile_text, weight_kg").eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
 def save_user_profile(line_user_id, raw_text):
@@ -296,7 +320,7 @@ def handle_postback(event):
             )
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                TextSendMessage(text=reply_text, quick_reply=get_quick_reply(profile["id"]))
             )
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -334,28 +358,41 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     else:
         try:
-            # ⚡ 零延遲通道：若用戶點擊「查看今日卡路里」，繞過 AI 直接查 Supabase
+            user_id = profile["id"]
+
+            # 📊 查看今日卡路里：計算個人目標與剩餘額度
             if user_msg == "查看今日卡路里":
-                cals, protein = get_today_summary(profile["id"])
+                cals, protein = get_today_summary(user_id)
+                weight = profile.get("weight_kg") or 70.0
+                
+                # 計算減脂期個人建議目標（熱量以體重*20，蛋白質以體重*1.5 估算）
+                target_cal = int(weight * 20)
+                target_protein = int(weight * 1.5)
+                
+                rem_cal = max(0, target_cal - cals)
+                rem_protein = max(0, target_protein - protein)
+
                 reply_text = (
-                    f"📊 【今日攝取總計】\n\n"
-                    f"🔥 總熱量：{cals} kcal\n"
-                    f"💪 總蛋白質：{protein} g\n\n"
-                    f"提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬減脂菜單！"
+                    f"📊 【今日攝取總計與進度】\n\n"
+                    f"🔥 熱量：{cals} / {target_cal} kcal\n"
+                    f"└ 剩餘額度：{rem_cal} kcal\n\n"
+                    f"💪 蛋白質：{protein} / {target_protein} g\n"
+                    f"└ 剩餘額度：{rem_protein} g\n\n"
+                    f"💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬減脂菜單！"
                 )
                 line_bot_api.reply_message(
                     event.reply_token,
-                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
                 )
                 return
 
-            # 🚀 單次 API 合併處理通道
-            today_stats = get_today_summary(profile["id"])
+            # 一般對話與 AI 菜單生成
+            today_stats = get_today_summary(user_id)
             ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, user_msg)
             msg_type = ai_res.get("type")
 
             if msg_type == "log":
-                food, cal, protein, total_cal, total_protein = log_meal_to_supabase(profile["id"], ai_res)
+                food, cal, protein, total_cal, total_protein = log_meal_to_supabase(user_id, ai_res)
                 reply_text = (
                     f"📝 【紀錄成功】\n"
                     f"🍽️ {food}\n"
@@ -364,27 +401,27 @@ def handle_message(event):
                 )
                 line_bot_api.reply_message(
                     event.reply_token,
-                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
                 )
             elif msg_type == "recommendation":
                 flex_content = build_flex_card(ai_res)
                 flex_message = FlexSendMessage(
                     alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單",
                     contents=flex_content,
-                    quick_reply=get_quick_reply()
+                    quick_reply=get_quick_reply(user_id)
                 )
                 line_bot_api.reply_message(event.reply_token, flex_message)
             else:
                 reply_text = ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集")
                 line_bot_api.reply_message(
                     event.reply_token,
-                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
                 )
 
         except Exception as e:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply())
+                TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply(profile.get("id")))
             )
 
 if __name__ == "__main__":
