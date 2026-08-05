@@ -471,7 +471,6 @@ def build_flex_card(data):
     else:
         log_title = title
 
-    # 放寬長度截斷至 65 字，確保所有品項皆可完整顯示
     safe_log_title = log_title[:65]
 
     flex_json = {
@@ -833,6 +832,24 @@ def handle_message(event):
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null":
                 update_last_restaurant_in_profile(user_id, raw_p_text, rec_store)
+
+            # 熱量已達標/超標時的「純文字攔截 + 避坑提示」機制
+            cals, _ = today_stats
+            if cals >= target_cal:
+                store_display = rec_store if (rec_store and rec_store != "null") else "外食店家"
+                over_cal = cals - target_cal
+                status_str = f"已超標 {over_cal} kcal" if over_cal > 0 else "已完全額滿"
+                
+                reply_text = (
+                    f"⚠️ 今日熱量額度已達上限囉！（{status_str}）\n\n"
+                    f"今天不建議再攝取任何額外熱量。若一定要去【{store_display}】，"
+                    f"請僅選擇「無糖茶類、零卡汽水或瓶裝水」，避免影響今日減脂成果！"
+                )
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
+                )
+                return
 
             flex_content = build_flex_card(ai_res)
             flex_message = FlexSendMessage(
