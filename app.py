@@ -34,9 +34,8 @@ SYSTEM_PROMPT = """
 【重要回應規範】
 1. 嚴禁使用 `**` 粗體語法與 Emoji 符號！請直接輸出純文字。
 2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
-3. 若用戶問「今天吃了哪些/飲食紀錄」，請明確列出今日紀錄的餐點品項！
-4. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
-5. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
+3. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
+4. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
 """
 
 GOAL_MAP_TO_DB = {
@@ -339,13 +338,11 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     rem_cal = max(0, target_cal - cal)
     rem_protein = max(0, target_protein - protein)
 
-    # 動態計算剩餘需要完成的餐數
     logged_count = len(today_meals) if today_meals else 0
     is_two_meals = "168" in profile_str or "兩餐" in profile_str
     total_planned_meals = 2 if is_two_meals else 3
     remaining_meals = max(1, total_planned_meals - logged_count)
 
-    # 動態平攤單餐目標：精準按剩餘餐數平分剩餘額度
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
@@ -373,36 +370,43 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     {{
         "type": "log",
         "restaurant": "若有提及明確連鎖店家則填寫（如：7-11、八方雲集），無提及則填 null",
-        "food_name": "餐點名稱與份量",
+        "food_name": "具體餐點名稱與份量",
         "calories": 熱量估計整數,
         "protein_g": 蛋白質估計整數
     }}
 
     情境 B：用戶在【詢問外食/餐廳推薦】或【對上一輪推薦發出口味/調整需求】
-    【單餐精準推薦目標】：請直接設計一套約 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap} g 的豐富組合（大體重/168兩餐者請果斷給出雙份肉或高蛋白大餐，精準填滿當餐額度）！
-    【關鍵對話規則】：
-    1. 若用戶訊息是在對上一輪推薦做口味或細節調整（例如：「我想吃辣的」、「有別的嗎」、「太貴了」、「換一個」），且上一輪有餐廳（{last_restaurant}），必須「優先沿用同一家餐廳（{last_restaurant}）」重新組合菜單！嚴禁跳到其他無關連鎖店（如 7-11）。
-    2. 若用戶明確提及新餐廳（如：八方雲集、麥當勞），則以新餐廳為主。
+    【單餐精準推薦目標】：請直接設計一套約 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap} g 的豐富組合！
+    【關鍵規則】：
+    1. items 陣列中的每個品項，必須包含該單品的估計熱量與蛋白質！
+    2. 若用戶訊息是在對上一輪推薦做調整（如：「我想吃辣的」、「換一個」），且上一輪有餐廳（{last_restaurant}），必須「優先沿用同一家餐廳（{last_restaurant}）」！
 
     {{
         "type": "recommendation",
         "restaurant": "餐廳名稱（若屬調整則優先沿用 {last_restaurant}）",
-        "title": "菜單主題（必須精簡且控制在 10 個字以內！例如：麻辣鍋高蛋白吃到飽）",
+        "title": "菜單主題（必須控制在 10 個字以內！例如：高蛋白雙拼組）",
         "budget": "說明（嚴禁提及價格！例如：單餐飽足目標 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap}g）",
-        "items": ["餐點1", "餐點2", "餐點3"],
+        "items": [
+            {{
+                "name": "具體單品名稱1",
+                "cal": 熱量估計整數,
+                "protein": 蛋白質估計整數
+            }},
+            {{
+                "name": "具體單品名稱2",
+                "cal": 熱量估計整數,
+                "protein": 蛋白質估計整數
+            }}
+        ],
         "warning": "地雷提醒與避坑建議",
         "total_cal": 這套組合的總熱量數字,
         "total_protein": 這套組合的總蛋白質數字
     }}
 
-    情境 C：用戶在【一般對話/問剩餘卡路里/問今天吃了什麼】（例如：你好、我今天還能吃多少、今天吃了哪些東西）
-    【關鍵對話規則】：
-    1. 若用戶詢問「今天吃了哪些 / 今天吃了什麼 / 飲食紀錄」，必須根據上方【今日已紀錄餐點明細】列出具體餐點名稱！
-    2. 若用戶只是問「剩餘額度/還能吃多少」，列出正確剩餘熱量與蛋白質即可。
-
+    情境 C：用戶在【一般對話/問剩餘卡路里】（例如：你好、我今天還能吃多少）
     {{
         "type": "chat",
-        "reply_text": "精簡回答內容（150字以內。列出今日餐點名稱與總攝取，或正確剩餘數字）"
+        "reply_text": "精簡回答內容（150字以內。若提到剩餘熱量或蛋白質，必須完全照抄上述正確數字：熱量剩 {rem_cal} kcal、蛋白質差 {rem_protein} g）"
     }}
     """
     try:
@@ -422,9 +426,9 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
+    """【圖二優化】：解析每個細項品項，為每一個餐點獨立顯示熱量與蛋白質」"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
-    safe_title = title[:15]
     
     budget = data.get("budget", "符合個人每日熱量控制")
     items = data.get("items", [])
@@ -433,15 +437,43 @@ def build_flex_card(data):
     total_protein = data.get("total_protein", 30)
 
     items_contents = []
+    item_names_list = []
+
     for item in items:
+        if isinstance(item, dict):
+            name = item.get("name", "餐點")
+            c = item.get("cal", 0)
+            p = item.get("protein", 0)
+            item_str = f"• {name} (約 {c} kcal / {p}g 蛋白質)"
+            item_names_list.append(name)
+        elif isinstance(item, str):
+            if "(" in item and "kcal" in item:
+                item_str = f"• {item}" if not item.startswith("•") else item
+                clean_name = item.split("(")[0].replace("•", "").strip()
+            else:
+                item_str = f"• {item}" if not item.startswith("•") else item
+                clean_name = item.replace("•", "").strip()
+            item_names_list.append(clean_name)
+        else:
+            item_str = f"• {str(item)}"
+            item_names_list.append(str(item))
+
         items_contents.append({
             "type": "text",
-            "text": f"• {item}",
+            "text": item_str,
             "size": "sm",
             "color": "#555555",
             "margin": "xs",
             "wrap": True
         })
+
+    # 「一鍵紀錄」時寫入 Supabase 的真實餐點名稱組合（如：玫瑰油雞腿飯、單點滷排骨、單點滷蛋）
+    if item_names_list:
+        log_title = "、".join(item_names_list)
+    else:
+        log_title = title
+
+    safe_log_title = log_title[:25]  # postback 長度限制防護
 
     flex_json = {
         "type": "bubble",
@@ -477,7 +509,7 @@ def build_flex_card(data):
                     "action": {
                         "type": "postback",
                         "label": f"一鍵紀錄這餐 ({total_cal} kcal)",
-                        "data": f"action=log_meal&restaurant={restaurant}&title={safe_title}&cal={total_cal}&protein={total_protein}",
+                        "data": f"action=log_meal&restaurant={restaurant}&title={safe_log_title}&cal={total_cal}&protein={total_protein}",
                         "displayText": f"我決定吃【{restaurant}】這套組合！"
                     }
                 }
@@ -735,6 +767,30 @@ def handle_message(event):
                 profile.get("weight_kg"), profile.get("height_cm"), user_age, profile.get("gender"), 
                 profile.get("goal"), raw_p_text, raw_p_text
             )
+
+        # 【圖一優化】：直接由 Python 精準條列輸出今日已吃餐點，零 Token 消耗、1. 2. 3. 清楚呈現真實品項！
+        if any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
+            meals = get_today_meals_list(user_id)
+            if not meals:
+                reply_text = "今天尚無任何飲食紀錄。"
+            else:
+                lines = ["今日已紀錄餐點："]
+                for idx, m in enumerate(meals, 1):
+                    lines.append(f"{idx}. {m['food_name']} (+{m['calories']} kcal / +{m['protein_g']}g 蛋白質)")
+                
+                cals, protein = get_today_summary(user_id)
+                rem_cal = max(0, target_cal - cals)
+                rem_protein = max(0, target_protein - protein)
+                
+                lines.append(f"\n今日總計：{cals} / {target_cal} kcal ｜ 蛋白質：{protein} / {target_protein} g")
+                lines.append(f"剩餘額度：{rem_cal} kcal ｜ 蛋白質還差：{rem_protein} g")
+                reply_text = "\n".join(lines)
+            
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
+            )
+            return
 
         if user_msg == "刪除上一筆" or user_msg == "刪除紀錄":
             del_msg = delete_last_meal(user_id)
