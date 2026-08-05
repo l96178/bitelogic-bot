@@ -232,25 +232,38 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     判斷意圖，僅輸出純 JSON:
     A.飲食紀錄: {{"type":"log","restaurant":"連鎖店或null","food_name":"名稱","calories":整數,"protein_g":整數}}
     B.餐廳推薦/調整: 設計約{meal_cal_cap}kcal/{meal_protein_cap}g蛋白質組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
-    {{"type":"recommendation","restaurant":"店名","title":"10字內主題","budget":"單餐目標{meal_cal_cap}kcal","items":[{{"name":"單品名","cal":整數,"protein":整數}}],"warning":"避坑提示","total_cal":整數,"total_protein":整數}}
+    {{"type":"recommendation","restaurant":"店名","title":"10字內主題","budget":"單餐目標{meal_cal_cap}kcal","items":[{"name":"單品名","cal":整數,"protein":整數}],"warning":"避坑提示","total_cal":整數,"total_protein":整數}}
     C.一般對話/問額度: {{"type":"chat","reply_text":"精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)"}}
     """
     try:
-        # 改用官方推薦的 Interactions API 標準 call 方式
         interaction = client.interactions.create(
-            model="gemini-3.5-flash-lite",
+            model="gemini-3.5-flash",
             input=prompt
         )
         res_text = interaction.text if hasattr(interaction, 'text') else str(interaction)
-        if not res_text: return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
+        if not res_text: 
+            return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
         
+        # 1. 先清除 Markdown 程式碼區塊標記
         cleaned = re.sub(r'^```json\s*|\s*```$', '', res_text.strip(), flags=re.MULTILINE)
+        
+        # 2. 強效擷取第一個包含最大範圍的 JSON 結構 {}
         json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        return json.loads(json_match.group(0)) if json_match else {"type": "chat", "reply_text": cleaned}
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                # 萬一遇到多餘數據，嘗試精準裁切第一組完整 JSON
+                end_pos = json_str.rfind('}') + 1
+                return json.loads(json_str[:end_pos])
+        
+        return {"type": "chat", "reply_text": cleaned}
+
     except Exception as e:
-        print("❌ Interactions API 完整報錯細節：")
+        print("❌ Interactions API 處理失敗：")
         print(traceback.format_exc())
-        return {"type": "chat", "reply_text": f"AI 連線失敗：{str(e)}"}
+        return {"type": "chat", "reply_text": f"AI 處理失敗：{str(e)}"}
 
 def build_flex_card(data):
     restaurant = data.get("restaurant", "外食推薦")
