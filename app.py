@@ -38,6 +38,7 @@ SYSTEM_PROMPT = """
 1. 嚴禁使用 `**` 粗體語法！請直接輸出純文字。
 2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
+4. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
 """
 
 def calculate_targets(weight_kg, goal):
@@ -109,13 +110,11 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
     cal_bar_w = f"{max(3, cal_pct)}%"
     protein_bar_w = f"{max(3, protein_pct)}%"
 
-    # 熱量描述（熱量為上限，區分剩餘與超額）
     if cals > target_cal:
         cal_subtext = f"└ ⚠️ 已超出上限：{cals - target_cal} kcal"
     else:
         cal_subtext = f"└ 剩餘額度：{rem_cal} kcal"
 
-    # 蛋白質描述（蛋白質為目標，區分差距與達標）
     if protein >= target_protein:
         protein_subtext = "└ 🎉 蛋白質已成功達標！"
     else:
@@ -123,7 +122,6 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
 
     body_contents = []
 
-    # 若剛完成紀錄，卡片頂部加入單餐紀錄明細
     if last_logged_info:
         food_name = last_logged_info.get("food", "")
         item_cal = last_logged_info.get("cal", 0)
@@ -137,7 +135,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
                 "paddingAll": "md",
                 "contents": [
                     {"type": "text", "text": "📝 成功寫入飲食紀錄", "size": "xs", "color": "#059669", "weight": "bold"},
-                    {"type": "text", "text": f"{food_name}", "size": "sm", "weight": "bold", "color": "#065F46", "margin": "xs"},
+                    {"type": "text", "text": f"{food_name}", "size": "sm", "weight": "bold", "color": "#065F46", "margin": "xs", "wrap": True},
                     {"type": "text", "text": f"+{item_cal} kcal ｜ +{item_protein} g 蛋白質", "size": "xs", "color": "#047857", "margin": "xs"}
                 ]
             },
@@ -310,7 +308,7 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
         "type": "recommendation",
         "restaurant": "餐廳名稱",
         "title": "菜單主題",
-        "budget": "預算/熱量說明",
+        "budget": "熱量與營養目標說明（嚴禁提及價格與金額！例如：總熱量控制在 600 kcal 內）",
         "items": ["餐點1", "餐點2"],
         "warning": "地雷提醒",
         "total_cal": 熱量數字,
@@ -340,9 +338,10 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
         return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
+    """菜單推薦卡片：移除酪梨 Icon、移除價格、開啟文字自動換行避免裁切"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
-    budget = data.get("budget", "符合個人每日額度")
+    budget = data.get("budget", "符合個人每日熱量控制")
     items = data.get("items", [])
     warning = data.get("warning", "注意適量攝取")
     total_cal = data.get("total_cal", 500)
@@ -355,7 +354,8 @@ def build_flex_card(data):
             "text": f"• {item}",
             "size": "sm",
             "color": "#555555",
-            "margin": "xs"
+            "margin": "xs",
+            "wrap": True  # 關鍵：開啟自動換行，防止名稱過長被切斷成 ...
         })
 
     flex_json = {
@@ -365,7 +365,7 @@ def build_flex_card(data):
             "layout": "vertical",
             "backgroundColor": "#27AE60",
             "contents": [
-                {"type": "text", "text": f"🥑 【{restaurant}】", "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": f"【{restaurant}】", "weight": "bold", "color": "#FFFFFF", "size": "md"},
                 {"type": "text", "text": title, "weight": "bold", "color": "#FFFFFF", "size": "lg", "margin": "xs"}
             ]
         },
@@ -373,7 +373,7 @@ def build_flex_card(data):
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {"type": "text", "text": f"📊 {budget}", "weight": "bold", "size": "sm", "color": "#27AE60"},
+                {"type": "text", "text": f"📊 {budget}", "weight": "bold", "size": "sm", "color": "#27AE60", "wrap": True},
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": "📝 進店直接點：", "weight": "bold", "size": "sm", "margin": "md"},
                 *items_contents,
