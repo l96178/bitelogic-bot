@@ -43,18 +43,12 @@ SYSTEM_PROMPT = """
 ⚠️ 地雷提醒：千萬別點鍋貼與酸辣湯！
 """
 
-def get_official_model_names():
-    try:
-        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        flash_models = [m for m in valid_models if 'flash' in m.lower()]
-        return flash_models if flash_models else ["gemini-1.5-flash"]
-    except Exception:
-        return ["gemini-1.5-flash"]
-
 def ask_gemini(profile_str, user_msg):
-    # 自動抓取目前有效的 Flash 模型名稱，避免 404
-    model_name = get_official_model_names()[0]
-    model = genai.GenerativeModel(model_name=model_name, system_instruction=SYSTEM_PROMPT)
+    # 鎖定 CP 值與速度最佳平衡的 gemini-3.5-flash
+    model = genai.GenerativeModel(
+        model_name="gemini-3.5-flash", 
+        system_instruction=SYSTEM_PROMPT
+    )
     
     prompt = f"我的身體數據與個人檔案：{profile_str}\n\n我的問題或指令：{user_msg}" if profile_str else user_msg
     response = model.generate_content(prompt)
