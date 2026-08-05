@@ -40,8 +40,25 @@ SYSTEM_PROMPT = """
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 """
 
+def calculate_targets(weight_kg, goal):
+    """根據個人體重與指定目標（減脂 / 增肌 / 增肌減脂）動態計算每日目標"""
+    weight = float(weight_kg) if weight_kg else 70.0
+    goal_str = str(goal) if goal else ""
+
+    if "增肌" in goal_str and "減脂" in goal_str:
+        target_cal = int(weight * 22)
+        target_protein = int(weight * 2.0)
+    elif "增肌" in goal_str:
+        target_cal = int(weight * 26)
+        target_protein = int(weight * 1.8)
+    else:
+        target_cal = int(weight * 20)
+        target_protein = int(weight * 1.5)
+
+    return target_cal, target_protein
+
 def generate_progress_bar(current, target, bar_length=10):
-    """根據當前值與目標值生成文字進度條（例：[▓▓▓░░░░░░░] 30%）"""
+    """根據當前值與目標值生成文字進度條"""
     if target <= 0:
         return "░" * bar_length, 0
     ratio = current / target
@@ -51,7 +68,6 @@ def generate_progress_bar(current, target, bar_length=10):
     return bar, pct
 
 def get_quick_reply(user_id=None):
-    """【精準過濾店家】只針對帶有【店家名稱】標籤的歷史紀錄提取真實店家名"""
     items = [
         QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里"))
     ]
@@ -82,7 +98,6 @@ def get_quick_reply(user_id=None):
     return QuickReply(items=items)
 
 def parse_profile_data(raw_text):
-    """強健版建檔解析：優先 Python Regex 提取，失敗再備用 AI 處理"""
     parsed = {}
     
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
@@ -100,28 +115,32 @@ def parse_profile_data(raw_text):
     if "男" in raw_text: parsed["gender"] = "男"
     elif "女" in raw_text: parsed["gender"] = "女"
     
-    if "增肌" in raw_text: parsed["goal"] = "增肌"
-    elif "減脂" in raw_text: parsed["goal"] = "減脂"
+    if "增肌" in raw_text and "減脂" in raw_text:
+        parsed["goal"] = "增肌減脂"
+    elif "增肌" in raw_text:
+        parsed["goal"] = "增肌"
+    elif "減脂" in raw_text:
+        parsed["goal"] = "減脂"
 
     if parsed.get("height_cm") and parsed.get("weight_kg"):
         return parsed
 
     try:
         model = genai.GenerativeModel("gemini-3.5-flash")
-        prompt = f'從以下文字擷取健康數據，僅輸出純 JSON："{raw_text}"。格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "減脂"}}'
-        res = model.generate_content(prompt).text.strip()
-        
-        json_match = re.search(r'\{.*\}', res, re.DOTALL)
-        if json_match:
-            ai_data = json.loads(json_match.group(0))
-            parsed.update({k: v for k, v in ai_data.items() if v is not None})
+        prompt = f'從以下文字擷取健康數據，僅輸出純 JSON："{raw_text}"。格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "增肌減脂"}}'
+        res = model.generate_content(prompt)
+        if res and res.text:
+            json_match = re.search(r'\{.*\}', res.text.strip(), re.DOTALL)
+            if json_match:
+                ai_data = json.loads(json_match.group(0))
+                parsed.update({k: v for k, v in ai_data.items() if v is not None})
     except Exception:
         pass
 
     return parsed
 
 def process_ai_in_single_call(profile_str, today_stats, user_msg):
-    """單次呼叫 Gemini 處理意圖與生成回應"""
+    """鎖定使用 gemini-3.5-flash 模型處理對話與推薦"""
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     
@@ -160,16 +179,22 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
     }}
     """
     try:
-        res = model.generate_content(prompt).text.strip()
-        json_match = re.search(r'\{.*\}', res, re.DOTALL)
+        res = model.generate_content(prompt)
+        if not res or not res.text:
+            return {"type": "chat", "reply_text": "AI 暫時無法產生內容，請再試一次。"}
+        
+        raw_text = res.text.strip()
+        cleaned = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE)
+        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        
         if json_match:
             return json.loads(json_match.group(0))
-        return {"type": "chat", "reply_text": res}
-    except Exception:
-        return {"type": "chat", "reply_text": "系統繁忙，請稍後再試！"}
+        return {"type": "chat", "reply_text": raw_text}
+    except Exception as e:
+        print(f"❌ Gemini Error: {str(e)}")
+        return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
-    """動態建構 LINE Flex Message 卡片 json"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
     budget = data.get("budget", "符合個人每日額度")
@@ -235,24 +260,25 @@ def get_today_str():
     return datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d")
 
 def get_user_profile(line_user_id):
-    res = supabase.table("profiles").select("id, raw_profile_text, weight_kg").eq("line_user_id", line_user_id).execute()
+    res = supabase.table("profiles").select("id, raw_profile_text, weight_kg, goal").eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
 def save_user_profile(line_user_id, raw_text):
     parsed = parse_profile_data(raw_text)
     height = parsed.get("height_cm")
     weight = parsed.get("weight_kg")
+    goal = parsed.get("goal")
 
     try:
         height_num = float(height) if height is not None else None
         weight_num = float(weight) if weight is not None else None
     except (ValueError, TypeError):
-        return False, "數據無法解析，請重新輸入合理的身體數據（例如：173 / 85 / 男 / 減脂）", None
+        return False, "數據無法解析，請重新輸入合理的身體數據（例如：173 / 85 / 男 / 減脂）", None, None
 
     if not height_num or not (50 <= height_num <= 250):
-        return False, "身高數據不太對勁喔！請填寫 50 ~ 250 公分之間的數字。", None
+        return False, "身高數據不太對勁喔！請填寫 50 ~ 250 公分之間的數字。", None, None
     if not weight_num or not (20 <= weight_num <= 300):
-        return False, "體重數據不太對勁喔！請填寫 20 ~ 300 公斤之間的數字。", None
+        return False, "體重數據不太對勁喔！請填寫 20 ~ 300 公斤之間的數字。", None, None
 
     payload = {
         "line_user_id": line_user_id,
@@ -260,10 +286,10 @@ def save_user_profile(line_user_id, raw_text):
         "height_cm": height_num,
         "weight_kg": weight_num,
         "gender": parsed.get("gender"),
-        "goal": parsed.get("goal")
+        "goal": goal
     }
     supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
-    return True, "建檔成功", weight_num
+    return True, "建檔成功", weight_num, goal
 
 def log_meal_to_supabase(user_id, intent_data):
     today = get_today_str()
@@ -379,14 +405,13 @@ def handle_message(event):
 
         if has_numbers or has_keywords:
             try:
-                is_success, msg, weight = save_user_profile(line_user_id, user_msg)
+                is_success, msg, weight, goal = save_user_profile(line_user_id, user_msg)
                 if is_success:
-                    weight_val = weight or 70.0
-                    target_cal = int(weight_val * 20)
-                    target_protein = int(weight_val * 1.5)
+                    target_cal, target_protein = calculate_targets(weight, goal)
 
                     reply_text = (
                         f"🎉 【專屬健康檔案建檔成功】\n\n"
+                        f"🎯 目標模式：{goal or '健康減脂'}\n"
                         f"📊 您的每日建議控制目標：\n"
                         f"• 建議總熱量：約 {target_cal} kcal / 日\n"
                         f"• 建議蛋白質：約 {target_protein} g / 日\n\n"
@@ -418,9 +443,9 @@ def handle_message(event):
             if user_msg == "查看今日卡路里":
                 cals, protein = get_today_summary(user_id)
                 weight = profile.get("weight_kg") or 70.0
+                goal = profile.get("goal") or "減脂"
                 
-                target_cal = int(weight * 20)
-                target_protein = int(weight * 1.5)
+                target_cal, target_protein = calculate_targets(weight, goal)
                 
                 rem_cal = max(0, target_cal - cals)
                 rem_protein = max(0, target_protein - protein)
@@ -429,14 +454,14 @@ def handle_message(event):
                 protein_bar, protein_pct = generate_progress_bar(protein, target_protein)
 
                 reply_text = (
-                    f"📊 【今日攝取總計與進度】\n\n"
+                    f"📊 【今日攝取總計與進度】（{goal}模式）\n\n"
                     f"🔥 熱量：{cals} / {target_cal} kcal ({cal_pct}%)\n"
                     f"[{cal_bar}]\n"
                     f"└ 剩餘額度：{rem_cal} kcal\n\n"
                     f"💪 蛋白質：{protein} / {target_protein} g ({protein_pct}%)\n"
                     f"[{protein_bar}]\n"
                     f"└ 剩餘額度：{rem_protein} g\n\n"
-                    f"💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬減脂菜單！"
+                    f"💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬菜單！"
                 )
                 line_bot_api.reply_message(
                     event.reply_token,
