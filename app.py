@@ -57,7 +57,6 @@ def get_quick_reply(user_id=None):
                     freq = {}
                     for m in meals.data:
                         raw_name = m["food_name"]
-                        # 嚴格使用正規表達式，只擷取 【 】 裡面的真實店家名稱（例如 【八方雲集】）
                         match = re.search(r'【(.*?)】', raw_name)
                         if match:
                             store_name = match.group(1).strip()
@@ -73,20 +72,50 @@ def get_quick_reply(user_id=None):
     return QuickReply(items=items)
 
 def parse_profile_data(raw_text):
-    """解析使用者輸入的健康數據"""
-    model = genai.GenerativeModel("gemini-3.5-flash")
-    prompt = f"""
-    請從以下文字擷取個人的健康數據，只輸出純 JSON 格式（嚴禁包含 ```json）：
-    輸入內容："{raw_text}"
-    輸出格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "減脂"}}
-    欄位缺失請設為 null。
-    """
+    """強健版建檔解析：優先 Python Regex 提取，失敗再備用 AI 處理"""
+    parsed = {}
+    
+    # 1. 先用 Regex 抓取數字（例如 180/105 或 180cm 105kg）
+    nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
+    if len(nums) >= 2:
+        # 尋找合理的 50~250 數字作為身高，20~300 作為體重
+        height_candidates = [n for n in nums if 50 <= n <= 250]
+        weight_candidates = [n for n in nums if 20 <= n <= 300]
+        
+        if height_candidates:
+            parsed["height_cm"] = height_candidates[0]
+        if weight_candidates:
+            # 取不同於身高的數字作為體重
+            weights = [w for w in weight_candidates if w != parsed.get("height_cm")]
+            if weights:
+                parsed["weight_kg"] = weights[0]
+
+    # 擷取性別與目標
+    if "男" in raw_text: parsed["gender"] = "男"
+    elif "女" in raw_text: parsed["gender"] = "女"
+    
+    if "增肌" in raw_text: parsed["goal"] = "增肌"
+    elif "減脂" in raw_text: parsed["goal"] = "減脂"
+
+    # 若 Regex 成功解析出核心數值，立刻返回
+    if parsed.get("height_cm") and parsed.get("weight_kg"):
+        return parsed
+
+    # 2. 備用方案：若用戶寫長文，交給 Gemini 提取 JSON
     try:
+        model = genai.GenerativeModel("gemini-3.5-flash")
+        prompt = f'從以下文字擷取健康數據，僅輸出純 JSON："{raw_text}"。格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "減脂"}}'
         res = model.generate_content(prompt).text.strip()
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res, flags=re.MULTILINE)
-        return json.loads(cleaned)
+        
+        # 嚴格只提取 {...} 區塊內容，防止 Markdown 廢話破壞 json.loads
+        json_match = re.search(r'\{.*\}', res, re.DOTALL)
+        if json_match:
+            ai_data = json.loads(json_match.group(0))
+            parsed.update({k: v for k, v in ai_data.items() if v is not None})
     except Exception:
-        return {}
+        pass
+
+    return parsed
 
 def process_ai_in_single_call(profile_str, today_stats, user_msg):
     """單次呼叫 Gemini 處理意圖與生成回應"""
@@ -129,8 +158,10 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
     """
     try:
         res = model.generate_content(prompt).text.strip()
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res, flags=re.MULTILINE)
-        return json.loads(cleaned)
+        json_match = re.search(r'\{.*\}', res, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+        return {"type": "chat", "reply_text": res}
     except Exception:
         return {"type": "chat", "reply_text": "系統繁忙，請稍後再試！"}
 
@@ -213,7 +244,7 @@ def save_user_profile(line_user_id, raw_text):
         height_num = float(height) if height is not None else None
         weight_num = float(weight) if weight is not None else None
     except (ValueError, TypeError):
-        return False, "數據無法解析，請重新輸入合理的身體數據（例如：175cm / 70kg / 男 / 減脂）"
+        return False, "數據無法解析，請重新輸入合理的身體數據（例如：173 / 85 / 男 / 減脂）"
 
     if not height_num or not (50 <= height_num <= 250):
         return False, "身高數據不太對勁喔！請填寫 50 ~ 250 公分之間的數字。"
@@ -236,11 +267,10 @@ def log_meal_to_supabase(user_id, intent_data):
     cals = int(intent_data.get("calories", 0))
     protein = int(intent_data.get("protein_g", 0))
     
-    # 組合出乾淨的包含【店家】與餐點名稱的格式
     restaurant = intent_data.get("restaurant")
     food_name_raw = intent_data.get("food_name", "未知餐點")
     
-    if restaurant:
+    if restaurant and restaurant != "null":
         full_food_name = f"【{restaurant}】{food_name_raw}"
     else:
         full_food_name = food_name_raw
