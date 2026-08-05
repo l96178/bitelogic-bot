@@ -41,30 +41,29 @@ SYSTEM_PROMPT = """
 """
 
 def get_quick_reply(user_id=None):
-    """【動態生成選單】根據該用戶歷史最常吃的店家生成快捷按鈕，無紀錄則不顯示預設店家"""
+    """【精準過濾店家】只針對帶有【店家名稱】標籤的歷史紀錄提取真實店家名"""
     items = [
         QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里"))
     ]
     
     if user_id:
         try:
-            # 從 Supabase 查詢該用戶過去紀錄過的所有餐點
             res = supabase.table("daily_logs").select("id").eq("user_id", user_id).execute()
             if res.data:
                 log_ids = [r["id"] for r in res.data]
                 meals = supabase.table("meal_items").select("food_name").in_("daily_log_id", log_ids).execute()
                 
                 if meals.data:
-                    # 分析並統計用戶最常出現的店家前綴名稱
                     freq = {}
                     for m in meals.data:
                         raw_name = m["food_name"]
-                        # 擷取店家名稱（例："八方雲集-精準控卡" 拆出 "八方雲集"）
-                        store_name = raw_name.split("-")[0].split(" ")[0].strip()
-                        if len(store_name) >= 2:
-                            freq[store_name] = freq.get(store_name, 0) + 1
+                        # 嚴格使用正規表達式，只擷取 【 】 裡面的真實店家名稱（例如 【八方雲集】）
+                        match = re.search(r'【(.*?)】', raw_name)
+                        if match:
+                            store_name = match.group(1).strip()
+                            if store_name:
+                                freq[store_name] = freq.get(store_name, 0) + 1
                     
-                    # 取出次數最高的前 3 名店家
                     top_stores = sorted(freq, key=freq.get, reverse=True)[:3]
                     for store in top_stores:
                         items.append(QuickReplyButton(action=MessageAction(label=f"🍽️ {store}", text=f"{store}推薦")))
@@ -101,9 +100,10 @@ def process_ai_in_single_call(profile_str, today_stats, user_msg):
 
     請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤）：
 
-    情境 A：用戶在【記錄飲食】（例如：我吃了排骨飯、剛剛喝了無糖豆漿）
+    情境 A：用戶在【記錄飲食】（例如：我吃了排骨飯、剛剛在 7-11 喝了無糖豆漿）
     {{
         "type": "log",
+        "restaurant": "若有提及明確連鎖店家則填寫（如：7-11、八方雲集），無提及則填 null",
         "food_name": "餐點名稱與份量",
         "calories": 熱量估計整數,
         "protein_g": 蛋白質估計整數
@@ -188,7 +188,7 @@ def build_flex_card(data):
                     "action": {
                         "type": "postback",
                         "label": f"📝 一鍵紀錄這餐 ({total_cal} kcal)",
-                        "data": f"action=log_meal&food={restaurant}-{title}&cal={total_cal}&protein={total_protein}",
+                        "data": f"action=log_meal&restaurant={restaurant}&title={title}&cal={total_cal}&protein={total_protein}",
                         "displayText": f"我決定吃【{restaurant}】這套組合！"
                     }
                 }
@@ -235,7 +235,15 @@ def log_meal_to_supabase(user_id, intent_data):
     today = get_today_str()
     cals = int(intent_data.get("calories", 0))
     protein = int(intent_data.get("protein_g", 0))
-    food_name = intent_data.get("food_name", "未知餐點")
+    
+    # 組合出乾淨的包含【店家】與餐點名稱的格式
+    restaurant = intent_data.get("restaurant")
+    food_name_raw = intent_data.get("food_name", "未知餐點")
+    
+    if restaurant:
+        full_food_name = f"【{restaurant}】{food_name_raw}"
+    else:
+        full_food_name = food_name_raw
 
     log_res = supabase.table("daily_logs").select("id, total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
     
@@ -257,7 +265,7 @@ def log_meal_to_supabase(user_id, intent_data):
     supabase.table("meal_items").insert({
         "daily_log_id": daily_log_id,
         "meal_type": "snack",
-        "food_name": food_name,
+        "food_name": full_food_name,
         "calories": cals,
         "protein_g": protein
     }).execute()
@@ -269,7 +277,7 @@ def log_meal_to_supabase(user_id, intent_data):
         "total_protein_g": new_protein
     }).eq("id", daily_log_id).execute()
 
-    return food_name, cals, protein, new_cals, new_protein
+    return full_food_name, cals, protein, new_cals, new_protein
 
 def get_today_summary(user_id):
     today = get_today_str()
@@ -299,14 +307,16 @@ def handle_postback(event):
     
     action = data.get("action", [""])[0]
     if action == "log_meal":
-        food_name = data.get("food", ["推薦餐點"])[0]
+        restaurant = data.get("restaurant", ["外食"])[0]
+        title = data.get("title", ["精準餐點"])[0]
         cal = int(data.get("cal", [0])[0])
         protein = int(data.get("protein", [0])[0])
         
         profile = get_user_profile(line_user_id)
         if profile:
             intent_data = {
-                "food_name": food_name,
+                "restaurant": restaurant,
+                "food_name": title,
                 "calories": cal,
                 "protein_g": protein
             }
@@ -360,12 +370,10 @@ def handle_message(event):
         try:
             user_id = profile["id"]
 
-            # 📊 查看今日卡路里：計算個人目標與剩餘額度
             if user_msg == "查看今日卡路里":
                 cals, protein = get_today_summary(user_id)
                 weight = profile.get("weight_kg") or 70.0
                 
-                # 計算減脂期個人建議目標（熱量以體重*20，蛋白質以體重*1.5 估算）
                 target_cal = int(weight * 20)
                 target_protein = int(weight * 1.5)
                 
@@ -386,7 +394,6 @@ def handle_message(event):
                 )
                 return
 
-            # 一般對話與 AI 菜單生成
             today_stats = get_today_summary(user_id)
             ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, user_msg)
             msg_type = ai_res.get("type")
