@@ -34,7 +34,7 @@ SYSTEM_PROMPT = """
 【重要回應規範】
 1. 嚴禁使用 `**` 粗體語法與 Emoji 符號！請直接輸出純文字。
 2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
-3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
+3. 若用戶問「今天吃了哪些/飲食紀錄」，請明確列出今日紀錄的餐點品項！
 4. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
 5. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
 """
@@ -322,7 +322,16 @@ def parse_basic_profile(raw_text):
 
     return parsed if (parsed.get("height_cm") and parsed.get("weight_kg")) else None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None):
+def get_today_meals_list(user_id):
+    today = get_today_str()
+    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
+    if not log_res.data:
+        return []
+    daily_log_id = log_res.data[0]["id"]
+    meals_res = supabase.table("meal_items").select("food_name, calories, protein_g").eq("daily_log_id", daily_log_id).order("created_at", desc=False).execute()
+    return meals_res.data if meals_res.data else []
+
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
@@ -330,15 +339,32 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     rem_cal = max(0, target_cal - cal)
     rem_protein = max(0, target_protein - protein)
 
+    # 動態計算剩餘需要完成的餐數
+    logged_count = len(today_meals) if today_meals else 0
     is_two_meals = "168" in profile_str or "兩餐" in profile_str
-    meal_cal_cap = min(800, rem_cal) if is_two_meals else min(650, rem_cal)
-    meal_protein_cap = min(45, rem_protein)
+    total_planned_meals = 2 if is_two_meals else 3
+    remaining_meals = max(1, total_planned_meals - logged_count)
+
+    # 動態平攤單餐目標：精準按剩餘餐數平分剩餘額度
+    meal_cal_cap = int(rem_cal / remaining_meals)
+    meal_protein_cap = int(rem_protein / remaining_meals)
+
+    if today_meals:
+        meals_text_list = [f"• {m['food_name']} (+{m['calories']} kcal / +{m['protein_g']}g 蛋白質)" for m in today_meals]
+        meals_summary_str = "\n".join(meals_text_list)
+    else:
+        meals_summary_str = "今日尚無任何飲食紀錄"
 
     prompt = f"""
     個人檔案：{profile_str}
     【當前對話脈絡】：上一輪推薦的餐廳為「{last_restaurant or '無'}」
+    【今日已紀錄餐點明細】：
+    {meals_summary_str}
+
     今日已攝取：{cal} / {target_cal} kcal（正確剩餘：{rem_cal} kcal）
     蛋白質狀況：{protein} / {target_protein} g（正確還差：{rem_protein} g）
+    目前剩餘待吃餐數：{remaining_meals} 餐
+
     用戶訊息："{user_msg}"
 
     請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤與 Emoji）：
@@ -353,6 +379,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     }}
 
     情境 B：用戶在【詢問外食/餐廳推薦】或【對上一輪推薦發出口味/調整需求】
+    【單餐精準推薦目標】：請直接設計一套約 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap} g 的豐富組合（大體重/168兩餐者請果斷給出雙份肉或高蛋白大餐，精準填滿當餐額度）！
     【關鍵對話規則】：
     1. 若用戶訊息是在對上一輪推薦做口味或細節調整（例如：「我想吃辣的」、「有別的嗎」、「太貴了」、「換一個」），且上一輪有餐廳（{last_restaurant}），必須「優先沿用同一家餐廳（{last_restaurant}）」重新組合菜單！嚴禁跳到其他無關連鎖店（如 7-11）。
     2. 若用戶明確提及新餐廳（如：八方雲集、麥當勞），則以新餐廳為主。
@@ -360,7 +387,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     {{
         "type": "recommendation",
         "restaurant": "餐廳名稱（若屬調整則優先沿用 {last_restaurant}）",
-        "title": "菜單主題（必須精簡且控制在 10 個字以內！例如：麻辣鍋低卡吃法）",
+        "title": "菜單主題（必須精簡且控制在 10 個字以內！例如：麻辣鍋高蛋白吃到飽）",
         "budget": "說明（嚴禁提及價格！例如：單餐飽足目標 {meal_cal_cap} kcal / 蛋白質 {meal_protein_cap}g）",
         "items": ["餐點1", "餐點2", "餐點3"],
         "warning": "地雷提醒與避坑建議",
@@ -368,10 +395,14 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         "total_protein": 這套組合的總蛋白質數字
     }}
 
-    情境 C：用戶在【一般對話/問剩餘卡路里】（例如：你好、我今天還能吃多少）
+    情境 C：用戶在【一般對話/問剩餘卡路里/問今天吃了什麼】（例如：你好、我今天還能吃多少、今天吃了哪些東西）
+    【關鍵對話規則】：
+    1. 若用戶詢問「今天吃了哪些 / 今天吃了什麼 / 飲食紀錄」，必須根據上方【今日已紀錄餐點明細】列出具體餐點名稱！
+    2. 若用戶只是問「剩餘額度/還能吃多少」，列出正確剩餘熱量與蛋白質即可。
+
     {{
         "type": "chat",
-        "reply_text": "精簡回答內容（150字以內。若提到剩餘熱量或蛋白質，必須完全照抄上述正確數字：熱量剩 {rem_cal} kcal、蛋白質差 {rem_protein} g）"
+        "reply_text": "精簡回答內容（150字以內。列出今日餐點名稱與總攝取，或正確剩餘數字）"
     }}
     """
     try:
@@ -726,12 +757,12 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, flex_message)
             return
 
-        # 擷取上次推薦的餐廳名稱供 AI 當作上下文
         last_restaurant = extract_last_restaurant(raw_p_text)
-
         today_stats = get_today_summary(user_id)
+        today_meals = get_today_meals_list(user_id)
         target_stats = (target_cal, target_protein)
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, target_stats, user_msg, last_restaurant=last_restaurant)
+
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, target_stats, user_msg, last_restaurant=last_restaurant, today_meals=today_meals)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
