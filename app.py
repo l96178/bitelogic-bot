@@ -34,19 +34,10 @@ TAIWAN_TZ = timezone(timedelta(hours=8))
 SYSTEM_PROMPT = """
 你是「BiteLogic」——專為台灣外食族設計的精準外食減脂/增肌口袋菜單 AI 顧問。
 
-【重要回應規範（絕對嚴格遵守）】
+【重要回應規範】
 1. 嚴禁使用 `**` 粗體語法！請直接輸出純文字。
-2. 請善用【】與 Emoji 做標題區隔。
-3. 【極致精簡，直奔主題】：
-   - 說重點！回答請控制在 150 字以內！
-   - 當用戶問「今天還能吃多少/今日進度/剩餘熱量」時，【絕對禁止】主動推薦菜單與講大道理！只需用 3-4 行直接列出：
-     • 今日目標熱量與剩餘熱量
-     • 今日目標蛋白質與剩餘蛋白質
-     • 1 句極簡溫馨提醒。
-   - 只有當用戶主動提到「餐廳名稱」（如 7-11、八方雲集、麥當勞、推薦）時，才給予外食菜單推薦！
-
-【服務範疇】
-你只回答與「飲食、減脂、增肌、熱量、蛋白質、台灣外食選擇」相關問題。
+2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
+3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 """
 
 def get_quick_reply():
@@ -74,58 +65,42 @@ def parse_profile_data(raw_text):
     except Exception:
         return {}
 
-def analyze_user_intent(user_msg):
-    """判斷使用者意圖：要「記錄飲食」還是「詢問推薦/一般對話」"""
-    model = genai.GenerativeModel("gemini-3.5-flash")
-    prompt = f"""
-    請分析用戶訊息意圖，僅輸出純 JSON 格式（嚴禁包含 ```json）：
-    用戶訊息："{user_msg}"
-
-    如果是【記錄飲食】（例如：我吃了排骨飯、剛剛喝了無糖豆漿、早餐吃蛋餅）：
-    {{
-        "type": "log",
-        "food_name": "餐點名稱與份量",
-        "meal_type": "breakfast/lunch/dinner/snack 中最合適者",
-        "calories": 熱量估計數值 (整數 kcal),
-        "protein_g": 蛋白質估計數值 (整數 g)
-    }}
-
-    如果是【詢問菜單/一般對話】（例如：7-11減脂推薦、今天還能吃多少、八方雲集怎麼點、查看今日卡路里）：
-    {{
-        "type": "query"
-    }}
-    """
-    try:
-        res = model.generate_content(prompt).text.strip()
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res, flags=re.MULTILINE)
-        return json.loads(cleaned)
-    except Exception:
-        return {"type": "query"}
-
-def ask_gemini_structured_recommendation(profile_str, today_stats, user_msg):
-    """讓 Gemini 生成精簡的回答或結構化菜單"""
+def process_ai_in_single_call(profile_str, today_stats, user_msg):
+    """【極速優化】單次呼叫 Gemini，同步完成意圖判斷與內容生成"""
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
+    
     prompt = f"""
     個人檔案：{profile_str}
     今日已攝取：{cal} kcal ｜ 蛋白質 {protein} g
-    用戶問題：{user_msg}
+    用戶訊息："{user_msg}"
 
-    注意事項：
-    1. 如果用戶只是問「剩餘額度/今日卡路里/還能吃多少」，`is_recommendation` 務必設為 false，並在 `reply_text` 用最精簡的 3-4 行直接給出剩餘熱量與剩餘蛋白質，絕對不要推薦任何餐廳與菜單！
-    2. 如果用戶明確詢問「某餐廳/超商/菜單推薦」，`is_recommendation` 才設為 true，並輸出 JSON 菜單。
+    請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤）：
 
-    輸出純 JSON 格式（嚴禁包含 ```json）：
+    情境 A：用戶在【記錄飲食】（例如：我吃了排骨飯、剛剛喝了無糖豆漿）
     {{
-        "is_recommendation": true / false,
+        "type": "log",
+        "food_name": "餐點名稱與份量",
+        "calories": 熱量估計整數,
+        "protein_g": 蛋白質估計整數
+    }}
+
+    情境 B：用戶在【詢問外食/餐廳推薦】（例如：7-11減脂推薦、麥當勞怎麼點）
+    {{
+        "type": "recommendation",
         "restaurant": "餐廳名稱",
         "title": "菜單主題",
         "budget": "預算/熱量說明",
         "items": ["餐點1", "餐點2"],
         "warning": "地雷提醒",
         "total_cal": 熱量數字,
-        "total_protein": 蛋白質數字,
-        "reply_text": "極精簡純文字回答 (150字以內)"
+        "total_protein": 蛋白質數字
+    }}
+
+    情境 C：用戶在【一般對話/問剩餘卡路里】（例如：你好、我今天還能吃多少）
+    {{
+        "type": "chat",
+        "reply_text": "精簡回答內容（150字以內）"
     }}
     """
     try:
@@ -133,7 +108,7 @@ def ask_gemini_structured_recommendation(profile_str, today_stats, user_msg):
         cleaned = re.sub(r'^```json\s*|\s*```$', '', res, flags=re.MULTILINE)
         return json.loads(cleaned)
     except Exception:
-        return {"is_recommendation": False, "reply_text": "系統分析完成，請繼續發問！"}
+        return {"type": "chat", "reply_text": "系統繁忙，請稍後再試！"}
 
 def build_flex_card(data):
     """動態建構 LINE Flex Message 卡片 json"""
@@ -237,7 +212,6 @@ def log_meal_to_supabase(user_id, intent_data):
     cals = int(intent_data.get("calories", 0))
     protein = int(intent_data.get("protein_g", 0))
     food_name = intent_data.get("food_name", "未知餐點")
-    meal_type = intent_data.get("meal_type", "snack")
 
     log_res = supabase.table("daily_logs").select("id, total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
     
@@ -258,7 +232,7 @@ def log_meal_to_supabase(user_id, intent_data):
 
     supabase.table("meal_items").insert({
         "daily_log_id": daily_log_id,
-        "meal_type": meal_type,
+        "meal_type": "snack",
         "food_name": food_name,
         "calories": cals,
         "protein_g": protein
@@ -309,7 +283,6 @@ def handle_postback(event):
         if profile:
             intent_data = {
                 "food_name": food_name,
-                "meal_type": "snack",
                 "calories": cal,
                 "protein_g": protein
             }
@@ -361,10 +334,28 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     else:
         try:
-            intent_data = analyze_user_intent(user_msg)
+            # ⚡ 零延遲通道：若用戶點擊「查看今日卡路里」，繞過 AI 直接查 Supabase
+            if user_msg == "查看今日卡路里":
+                cals, protein = get_today_summary(profile["id"])
+                reply_text = (
+                    f"📊 【今日攝取總計】\n\n"
+                    f"🔥 總熱量：{cals} kcal\n"
+                    f"💪 總蛋白質：{protein} g\n\n"
+                    f"提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬減脂菜單！"
+                )
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                )
+                return
 
-            if intent_data.get("type") == "log":
-                food, cal, protein, total_cal, total_protein = log_meal_to_supabase(profile["id"], intent_data)
+            # 🚀 單次 API 合併處理通道
+            today_stats = get_today_summary(profile["id"])
+            ai_res = process_ai_in_single_call(profile["raw_profile_text"], today_stats, user_msg)
+            msg_type = ai_res.get("type")
+
+            if msg_type == "log":
+                food, cal, protein, total_cal, total_protein = log_meal_to_supabase(profile["id"], ai_res)
                 reply_text = (
                     f"📝 【紀錄成功】\n"
                     f"🍽️ {food}\n"
@@ -375,24 +366,20 @@ def handle_message(event):
                     event.reply_token,
                     TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
                 )
+            elif msg_type == "recommendation":
+                flex_content = build_flex_card(ai_res)
+                flex_message = FlexSendMessage(
+                    alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單",
+                    contents=flex_content,
+                    quick_reply=get_quick_reply()
+                )
+                line_bot_api.reply_message(event.reply_token, flex_message)
             else:
-                today_stats = get_today_summary(profile["id"])
-                rec_data = ask_gemini_structured_recommendation(profile["raw_profile_text"], today_stats, user_msg)
-
-                if rec_data.get("is_recommendation"):
-                    flex_content = build_flex_card(rec_data)
-                    flex_message = FlexSendMessage(
-                        alt_text=f"BiteLogic 推薦：{rec_data.get('restaurant', '')}口袋菜單",
-                        contents=flex_content,
-                        quick_reply=get_quick_reply()
-                    )
-                    line_bot_api.reply_message(event.reply_token, flex_message)
-                else:
-                    reply_text = rec_data.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集")
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
-                    )
+                reply_text = ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集")
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply())
+                )
 
         except Exception as e:
             line_bot_api.reply_message(
