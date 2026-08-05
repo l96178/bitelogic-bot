@@ -41,23 +41,21 @@ SYSTEM_PROMPT = """
 """
 
 def calculate_targets(weight_kg, goal):
-    """加入大體重校正機制的動態熱量與蛋白質試算」"""
+    """大體重校正與目標計算"""
     weight = float(weight_kg) if weight_kg else 70.0
     goal_str = str(goal) if goal else ""
 
-    # 針對大體重（高體脂）使用者做熱量與蛋白質校正
     if weight >= 90:
-        cal_mult_cut = 18       # 純減脂
-        cal_mult_recomp = 19    # 增肌減脂
-        cal_mult_bulk = 22      # 純增肌
-        max_protein = 180       # 蛋白質保護上限（g）
+        cal_mult_cut = 18
+        cal_mult_recomp = 19
+        cal_mult_bulk = 22
+        max_protein = 180
     else:
         cal_mult_cut = 20
         cal_mult_recomp = 22
         cal_mult_bulk = 25
         max_protein = 200
 
-    # 精準目標匹配
     if "增肌" in goal_str and "減脂" in goal_str:
         target_cal = int(weight * cal_mult_recomp)
         target_protein = int(min(weight * 1.7, max_protein))
@@ -69,16 +67,6 @@ def calculate_targets(weight_kg, goal):
         target_protein = int(min(weight * 1.5, max_protein))
 
     return target_cal, target_protein
-
-def generate_progress_bar(current, target, bar_length=10):
-    """根據當前值與目標值生成文字進度條"""
-    if target <= 0:
-        return "░" * bar_length, 0
-    ratio = current / target
-    pct = int(ratio * 100)
-    filled_len = min(bar_length, int(bar_length * min(1.0, ratio)))
-    bar = "▓" * filled_len + "░" * (bar_length - filled_len)
-    return bar, pct
 
 def get_quick_reply(user_id=None):
     items = [
@@ -109,6 +97,112 @@ def get_quick_reply(user_id=None):
             pass
 
     return QuickReply(items=items)
+
+def build_summary_flex_card(cals, target_cal, protein, target_protein, goal):
+    """打造 App 級美觀的 LINE Flex 原生進度條卡片」"""
+    rem_cal = max(0, target_cal - cals)
+    rem_protein = max(0, target_protein - protein)
+
+    cal_pct = min(100, max(0, int((cals / target_cal) * 100))) if target_cal > 0 else 0
+    protein_pct = min(100, max(0, int((protein / target_protein) * 100))) if target_protein > 0 else 0
+
+    cal_bar_w = f"{max(3, cal_pct)}%"
+    protein_bar_w = f"{max(3, protein_pct)}%"
+
+    flex_json = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#1F2937",
+            "paddingAll": "lg",
+            "contents": [
+                {"type": "text", "text": "📊 今日攝取總計與進度", "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": f"🎯 目前模式：{goal or '健康減脂'}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+            ]
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "paddingAll": "lg",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {"type": "text", "text": "🔥 熱量攝取", "size": "sm", "weight": "bold", "color": "#374151"},
+                                {"type": "text", "text": f"{cals} / {target_cal} kcal ({cal_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "backgroundColor": "#E5E7EB",
+                            "height": "8px",
+                            "cornerRadius": "4px",
+                            "margin": "sm",
+                            "contents": [
+                                {
+                                    "type": "box",
+                                    "layout": "vertical",
+                                    "backgroundColor": "#EF4444" if cal_pct >= 100 else "#27AE60",
+                                    "height": "8px",
+                                    "width": cal_bar_w,
+                                    "cornerRadius": "4px",
+                                    "contents": []
+                                }
+                            ]
+                        },
+                        {"type": "text", "text": f"└ 剩餘額度：{rem_cal} kcal", "size": "xs", "color": "#9CA3AF", "margin": "xs"}
+                    ]
+                },
+                {"type": "separator"},
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {"type": "text", "text": "💪 蛋白質攝取", "size": "sm", "weight": "bold", "color": "#374151"},
+                                {"type": "text", "text": f"{protein} / {target_protein} g ({protein_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "backgroundColor": "#E5E7EB",
+                            "height": "8px",
+                            "cornerRadius": "4px",
+                            "margin": "sm",
+                            "contents": [
+                                {
+                                    "type": "box",
+                                    "layout": "vertical",
+                                    "backgroundColor": "#3B82F6",
+                                    "height": "8px",
+                                    "width": protein_bar_w,
+                                    "cornerRadius": "4px",
+                                    "contents": []
+                                }
+                            ]
+                        },
+                        {"type": "text", "text": f"└ 剩餘額度：{rem_protein} g", "size": "xs", "color": "#9CA3AF", "margin": "xs"}
+                    ]
+                },
+                {"type": "separator"},
+                {"type": "text", "text": "💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬菜單！", "size": "xs", "color": "#6B7280", "wrap": True}
+            ]
+        }
+    }
+    return flex_json
 
 def parse_profile_data(raw_text):
     parsed = {}
@@ -458,27 +552,14 @@ def handle_message(event):
                 goal = profile.get("goal") or "減脂"
                 
                 target_cal, target_protein = calculate_targets(weight, goal)
-                
-                rem_cal = max(0, target_cal - cals)
-                rem_protein = max(0, target_protein - protein)
 
-                cal_bar, cal_pct = generate_progress_bar(cals, target_cal)
-                protein_bar, protein_pct = generate_progress_bar(protein, target_protein)
-
-                reply_text = (
-                    f"📊 【今日攝取總計與進度】（{goal}模式）\n\n"
-                    f"🔥 熱量：{cals} / {target_cal} kcal ({cal_pct}%)\n"
-                    f"[{cal_bar}]\n"
-                    f"└ 剩餘額度：{rem_cal} kcal\n\n"
-                    f"💪 蛋白質：{protein} / {target_protein} g ({protein_pct}%)\n"
-                    f"[{protein_bar}]\n"
-                    f"└ 剩餘額度：{rem_protein} g\n\n"
-                    f"💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬菜單！"
+                summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, goal)
+                flex_message = FlexSendMessage(
+                    alt_text="BiteLogic 今日攝取進度",
+                    contents=summary_flex,
+                    quick_reply=get_quick_reply(user_id)
                 )
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id))
-                )
+                line_bot_api.reply_message(event.reply_token, flex_message)
                 return
 
             today_stats = get_today_summary(user_id)
