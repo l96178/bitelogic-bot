@@ -11,7 +11,7 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, 
     PostbackEvent, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction, PostbackAction
 )
-import google.generativeai as genai
+from google import genai  # 使用全新官方 SDK
 from supabase import create_client, Client
 
 app = Flask(__name__)
@@ -24,7 +24,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-genai.configure(api_key=GEMINI_API_KEY)
+
+# 初始化 Google GenAI 新版 Client
+client = genai.Client(api_key=GEMINI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
@@ -209,9 +211,6 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
-    # 使用 gemini-2.5-flash-lite，帶上完整的 models/ 路徑以利 SDK 識別
-    model_name = "models/gemini-2.5-flash-lite"
-    model = genai.GenerativeModel(model_name, system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
     
@@ -224,6 +223,8 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_protein_cap = int(rem_protein / remaining_meals)
 
     prompt = f"""
+    {SYSTEM_PROMPT}
+
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
     用戶說:"{user_msg}"
@@ -235,13 +236,19 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     C.一般對話/問額度: {{"type":"chat","reply_text":"精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)"}}
     """
     try:
-        res = model.generate_content(prompt)
-        if not res or not res.text: return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res.text.strip(), flags=re.MULTILINE)
+        # 改用官方推薦的 Interactions API 標準 call 方式
+        interaction = client.interactions.create(
+            model="gemini-3.5-flash",
+            input=prompt
+        )
+        res_text = interaction.text if hasattr(interaction, 'text') else str(interaction)
+        if not res_text: return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
+        
+        cleaned = re.sub(r'^```json\s*|\s*```$', '', res_text.strip(), flags=re.MULTILINE)
         json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         return json.loads(json_match.group(0)) if json_match else {"type": "chat", "reply_text": cleaned}
     except Exception as e:
-        print("❌ Gemini API 完整報錯細節：")
+        print("❌ Interactions API 完整報錯細節：")
         print(traceback.format_exc())
         return {"type": "chat", "reply_text": f"AI 連線失敗：{str(e)}"}
 
