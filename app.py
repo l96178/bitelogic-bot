@@ -40,6 +40,16 @@ SYSTEM_PROMPT = """
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 """
 
+def generate_progress_bar(current, target, bar_length=10):
+    """根據當前值與目標值生成文字進度條（例：[▓▓▓░░░░░░░] 30%）"""
+    if target <= 0:
+        return "░" * bar_length, 0
+    ratio = current / target
+    pct = int(ratio * 100)
+    filled_len = min(bar_length, int(bar_length * min(1.0, ratio)))
+    bar = "▓" * filled_len + "░" * (bar_length - filled_len)
+    return bar, pct
+
 def get_quick_reply(user_id=None):
     """【精準過濾店家】只針對帶有【店家名稱】標籤的歷史紀錄提取真實店家名"""
     items = [
@@ -75,7 +85,6 @@ def parse_profile_data(raw_text):
     """強健版建檔解析：優先 Python Regex 提取，失敗再備用 AI 處理"""
     parsed = {}
     
-    # 1. Regex 抓取數字
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
     if len(nums) >= 2:
         height_candidates = [n for n in nums if 50 <= n <= 250]
@@ -97,7 +106,6 @@ def parse_profile_data(raw_text):
     if parsed.get("height_cm") and parsed.get("weight_kg"):
         return parsed
 
-    # 2. 備用 AI 處理
     try:
         model = genai.GenerativeModel("gemini-3.5-flash")
         prompt = f'從以下文字擷取健康數據，僅輸出純 JSON："{raw_text}"。格式：{{"height_cm": 180, "weight_kg": 105, "gender": "男", "goal": "減脂"}}'
@@ -385,7 +393,6 @@ def handle_message(event):
                         f"💡 直接輸入想吃的餐廳（如：麥當勞、7-11、八方雲集）即可為您量身搭配外食菜單！"
                     )
                     
-                    # 重新取得剛建立好的用戶數據綁定選單
                     new_profile = get_user_profile(line_user_id)
                     line_bot_api.reply_message(
                         event.reply_token,
@@ -418,11 +425,16 @@ def handle_message(event):
                 rem_cal = max(0, target_cal - cals)
                 rem_protein = max(0, target_protein - protein)
 
+                cal_bar, cal_pct = generate_progress_bar(cals, target_cal)
+                protein_bar, protein_pct = generate_progress_bar(protein, target_protein)
+
                 reply_text = (
                     f"📊 【今日攝取總計與進度】\n\n"
-                    f"🔥 熱量：{cals} / {target_cal} kcal\n"
+                    f"🔥 熱量：{cals} / {target_cal} kcal ({cal_pct}%)\n"
+                    f"[{cal_bar}]\n"
                     f"└ 剩餘額度：{rem_cal} kcal\n\n"
-                    f"💪 蛋白質：{protein} / {target_protein} g\n"
+                    f"💪 蛋白質：{protein} / {target_protein} g ({protein_pct}%)\n"
+                    f"[{protein_bar}]\n"
                     f"└ 剩餘額度：{rem_protein} g\n\n"
                     f"💡 提示：直接輸入想吃的餐廳（如：麥當勞）即可獲取專屬減脂菜單！"
                 )
