@@ -41,19 +41,32 @@ SYSTEM_PROMPT = """
 """
 
 def calculate_targets(weight_kg, goal):
-    """根據個人體重與指定目標（減脂 / 增肌 / 增肌減脂）動態計算每日目標"""
+    """加入大體重校正機制的動態熱量與蛋白質試算」"""
     weight = float(weight_kg) if weight_kg else 70.0
     goal_str = str(goal) if goal else ""
 
-    if "增肌" in goal_str and "減脂" in goal_str:
-        target_cal = int(weight * 22)
-        target_protein = int(weight * 2.0)
-    elif "增肌" in goal_str:
-        target_cal = int(weight * 26)
-        target_protein = int(weight * 1.8)
+    # 針對大體重（高體脂）使用者做熱量與蛋白質校正
+    if weight >= 90:
+        cal_mult_cut = 18       # 純減脂
+        cal_mult_recomp = 19    # 增肌減脂
+        cal_mult_bulk = 22      # 純增肌
+        max_protein = 180       # 蛋白質保護上限（g）
     else:
-        target_cal = int(weight * 20)
-        target_protein = int(weight * 1.5)
+        cal_mult_cut = 20
+        cal_mult_recomp = 22
+        cal_mult_bulk = 25
+        max_protein = 200
+
+    # 精準目標匹配
+    if "增肌" in goal_str and "減脂" in goal_str:
+        target_cal = int(weight * cal_mult_recomp)
+        target_protein = int(min(weight * 1.7, max_protein))
+    elif "增肌" in goal_str:
+        target_cal = int(weight * cal_mult_bulk)
+        target_protein = int(min(weight * 1.8, max_protein))
+    else:
+        target_cal = int(weight * cal_mult_cut)
+        target_protein = int(min(weight * 1.5, max_protein))
 
     return target_cal, target_protein
 
@@ -140,7 +153,6 @@ def parse_profile_data(raw_text):
     return parsed
 
 def process_ai_in_single_call(profile_str, today_stats, user_msg):
-    """鎖定使用 gemini-3.5-flash 模型處理對話與推薦"""
     model = genai.GenerativeModel("gemini-3.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     
