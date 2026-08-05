@@ -209,7 +209,6 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
-    # 使用最適低成本模型 gemini-2.5-flash-lite
     model = genai.GenerativeModel("gemini-2.5-flash-lite", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
@@ -222,6 +221,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
+    # 修正 f-string 內的 JSON 括號轉義
     prompt = f"""
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
@@ -230,7 +230,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     判斷意圖，僅輸出純 JSON:
     A.飲食紀錄: {{"type":"log","restaurant":"連鎖店或null","food_name":"名稱","calories":整數,"protein_g":整數}}
     B.餐廳推薦/調整: 設計約{meal_cal_cap}kcal/{meal_protein_cap}g蛋白質組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
-    {{"type":"recommendation","restaurant":"店名","title":"10字內主題","budget":"單餐目標{meal_cal_cap}kcal","items":[{"name":"單品名","cal":整數,"protein":整數}],"warning":"避坑提示","total_cal":整數,"total_protein":整數}}
+    {{"type":"recommendation","restaurant":"店名","title":"10字內主題","budget":"單餐目標{meal_cal_cap}kcal","items":[{{"name":"單品名","cal":整數,"protein":整數}}],"warning":"避坑提示","total_cal":整數,"total_protein":整數}}
     C.一般對話/問額度: {{"type":"chat","reply_text":"精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)"}}
     """
     try:
@@ -383,7 +383,6 @@ def handle_postback(event):
             summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
-    # Step 2: 點選飲食目標 -> 引導選擇活動程度
     elif action == "step_goal":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
         goal = data.get("goal", ["減脂"])[0]
@@ -396,7 +395,6 @@ def handle_postback(event):
         ]
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已選擇飲食目標：【{goal}】\n\n下一步，請選擇您的【日常活動程度】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
 
-    # Step 3: 點選活動程度 -> 引導選擇餐數
     elif action == "step_activity":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
         goal, act = data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0]
@@ -407,7 +405,6 @@ def handle_postback(event):
         ]
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
 
-    # Step 4: 點選餐數 -> 計算目標並存檔
     elif action == "step_meal":
         h, w, a = float(data.get("h", [170])[0]), float(data.get("w", [70])[0]), float(data.get("a", [30])[0])
         g, goal_text, act, meal = data.get("g", ["男"])[0], data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0], data.get("meal", ["一天三餐"])[0]
@@ -447,8 +444,6 @@ def handle_message(event):
     if not profile or basic_profile:
         if basic_profile:
             h, w, a, g = str(basic_profile["height_cm"]), str(basic_profile["weight_kg"]), str(basic_profile.get("age", 30)), basic_profile["gender"]
-            
-            # Step 1: 自動解析基礎數據後，彈出飲食目標按鈕選單
             q_items = [
                 QuickReplyButton(action=PostbackAction(label="健康減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "減脂"}), display_text="我選擇：健康減脂")),
                 QuickReplyButton(action=PostbackAction(label="精準增肌", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌"}), display_text="我選擇：精準增肌")),
@@ -468,7 +463,6 @@ def handle_message(event):
         if not target_cal or not target_protein:
             target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
 
-        # 零 Token 耗費：後端直接回答今天吃了啥
         if any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
             meals = get_today_meals_list(user_id)
             if not meals:
@@ -510,7 +504,6 @@ def handle_message(event):
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null": update_last_restaurant_in_profile(user_id, raw_p_text, rec_store)
 
-            # 熱量額滿/超標：純文字攔截提示，不消耗多餘繪圖與卡片
             cals, _ = today_stats
             if cals >= target_cal:
                 store_display = rec_store if (rec_store and rec_store != "null") else "外食店家"
