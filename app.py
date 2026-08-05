@@ -28,7 +28,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-# 精簡 System Prompt 降低 Token 耗費
 SYSTEM_PROMPT = "你是 BiteLogic 外食 AI 顧問。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
@@ -209,8 +208,8 @@ def get_today_meals_list(user_id):
     return meals_res.data if meals_res.data else []
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
-    # 使用正確帶有 models/ 前綴的極致省錢模型
-    model = genai.GenerativeModel("models/gemini-2.5-flash-lite", system_instruction=SYSTEM_PROMPT)
+    # 使用最短、最穩定的標準模型名稱，避免任何截斷錯誤
+    model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=SYSTEM_PROMPT)
     cal, protein = today_stats
     target_cal, target_protein = target_stats
     
