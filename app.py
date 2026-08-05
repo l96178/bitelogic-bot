@@ -222,7 +222,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
-    # 正確對 JSON 括號使用雙括號 {{ }} 進行轉義
+    # 精準對 JSON 範例的大括號進行轉義
     prompt = f"""
     {SYSTEM_PROMPT}
 
@@ -245,16 +245,19 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         if not res_text: 
             return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
         
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res_text.strip(), flags=re.MULTILINE)
-        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                end_pos = json_str.rfind('}') + 1
-                return json.loads(json_str[:end_pos])
+        # 1. 移除 Markdown 程式碼標記
+        cleaned = re.sub(r'^```json\s*|\s*```$', '', res_text.strip(), flags=re.MULTILINE).strip()
         
+        # 2. 使用 raw_decode 從第一個 '{' 開始解析，無視後面多餘的雜訊
+        start_idx = cleaned.find('{')
+        if start_idx != -1:
+            try:
+                decoder = json.JSONDecoder()
+                obj, _ = decoder.raw_decode(cleaned[start_idx:])
+                return obj
+            except Exception as parse_err:
+                print(f"⚠️ raw_decode 解析失敗: {parse_err}")
+
         return {"type": "chat", "reply_text": cleaned}
 
     except Exception as e:
