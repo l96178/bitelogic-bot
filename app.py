@@ -583,8 +583,8 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"建檔失敗：{str(e)}"))
         else:
             reply_text = (
-                "歡迎來到 BiteLogic 🥑！\n\n"
-                "首次使用請先建立專屬檔案 📝\n\n"
+                "歡迎來到 BiteLogic ！\n\n"
+                "首次使用請先建立專屬檔案 \n\n"
                 "請直接回覆：\n"
                 "【身高 / 體重 / 性別 / 飲食目標 / 飲食習慣】\n"
                 "（例如：173 / 85 / 男 / 減脂增肌 / 一天吃兩餐）"
