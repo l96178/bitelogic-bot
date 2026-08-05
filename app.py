@@ -35,7 +35,7 @@ SYSTEM_PROMPT = """
 你是「BiteLogic」——專為台灣外食族設計的精準外食減脂/增肌口袋菜單 AI 顧問。
 
 【重要回應規範】
-1. 嚴禁使用 `**` 粗體語法！請直接輸出純文字。
+1. 嚴禁使用 `**` 粗體語法與 Emoji 符號！請直接輸出純文字。
 2. 說重點！極致精簡，純文字回答請控制在 150 字以內。
 3. 若用戶只是問「剩餘額度/還能吃多少」，絕對不要推薦菜單！用 3 行列出剩餘熱量與蛋白質即可。
 4. 推薦菜單時絕對不要提及任何價格與金額！僅關注熱量與蛋白質。
@@ -43,7 +43,7 @@ SYSTEM_PROMPT = """
 """
 
 def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level, meal_pattern):
-    """結合 BMR、TDEE 與健康底線保護機制的精準計算」"""
+    """結合 BMR、TDEE 與健康底線保護機制的精準計算"""
     weight = float(weight_kg) if weight_kg else 70.0
     height = float(height_cm) if height_cm else 170.0
     
@@ -76,7 +76,7 @@ def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level
     else:
         target_cal = int(tdee * 0.8)
 
-    # 安全保護（大體重防暴增、小體重防過低）
+    # 安全保護機制
     if weight >= 90:
         target_cal = min(target_cal, int(weight * 20))
         max_protein = 180
@@ -88,10 +88,9 @@ def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level
     return target_cal, target_protein
 
 def get_quick_reply(user_id=None):
-    """限制只撈最近 30 天紀錄，避免 SQL 查詢暴增"""
     items = [
-        QuickReplyButton(action=MessageAction(label="📊 今日卡路里", text="查看今日卡路里")),
-        QuickReplyButton(action=MessageAction(label="⚙️ 修改個人檔案", text="修改檔案"))
+        QuickReplyButton(action=MessageAction(label="今日卡路里", text="查看今日卡路里")),
+        QuickReplyButton(action=MessageAction(label="修改個人檔案", text="修改檔案"))
     ]
     
     if user_id:
@@ -114,7 +113,7 @@ def get_quick_reply(user_id=None):
                     
                     top_stores = sorted(freq, key=freq.get, reverse=True)[:3]
                     for store in top_stores:
-                        items.append(QuickReplyButton(action=MessageAction(label=f"🍽️ {store}", text=f"{store}推薦")))
+                        items.append(QuickReplyButton(action=MessageAction(label=f"{store}推薦", text=f"{store}推薦")))
         except Exception:
             pass
 
@@ -131,12 +130,12 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
     protein_bar_w = f"{max(3, protein_pct)}%"
 
     if cals > target_cal:
-        cal_subtext = f"└ ⚠️ 已超出上限：{cals - target_cal} kcal"
+        cal_subtext = f"└ 已超出上限：{cals - target_cal} kcal"
     else:
         cal_subtext = f"└ 剩餘額度：{rem_cal} kcal"
 
     if protein >= target_protein:
-        protein_subtext = "└ 🎉 蛋白質已成功達標！"
+        protein_subtext = "└ 蛋白質已成功達標！"
     else:
         protein_subtext = f"└ 距離目標：還差 {rem_protein} g"
 
@@ -154,7 +153,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
                 "cornerRadius": "md",
                 "paddingAll": "md",
                 "contents": [
-                    {"type": "text", "text": "📝 成功寫入飲食紀錄", "size": "xs", "color": "#059669", "weight": "bold"},
+                    {"type": "text", "text": "成功寫入飲食紀錄", "size": "xs", "color": "#059669", "weight": "bold"},
                     {"type": "text", "text": f"{food_name}", "size": "sm", "weight": "bold", "color": "#065F46", "margin": "xs", "wrap": True},
                     {"type": "text", "text": f"+{item_cal} kcal ｜ +{item_protein} g 蛋白質", "size": "xs", "color": "#047857", "margin": "xs"}
                 ]
@@ -171,7 +170,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
                     "type": "box",
                     "layout": "horizontal",
                     "contents": [
-                        {"type": "text", "text": "🔥 熱量攝取", "size": "sm", "weight": "bold", "color": "#374151"},
+                        {"type": "text", "text": "熱量攝取", "size": "sm", "weight": "bold", "color": "#374151"},
                         {"type": "text", "text": f"{cals} / {target_cal} kcal ({cal_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
                     ]
                 },
@@ -206,7 +205,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
                     "type": "box",
                     "layout": "horizontal",
                     "contents": [
-                        {"type": "text", "text": "💪 蛋白質攝取", "size": "sm", "weight": "bold", "color": "#374151"},
+                        {"type": "text", "text": "蛋白質攝取", "size": "sm", "weight": "bold", "color": "#374151"},
                         {"type": "text", "text": f"{protein} / {target_protein} g ({protein_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
                     ]
                 },
@@ -233,7 +232,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
             ]
         },
         {"type": "separator"},
-        {"type": "text", "text": "💡 提示：輸入「刪除上一筆」可撤銷最近一次紀錄。", "size": "xs", "color": "#6B7280", "wrap": True}
+        {"type": "text", "text": "提示：輸入「刪除上一筆」可撤銷最近一次紀錄。", "size": "xs", "color": "#6B7280", "wrap": True}
     ])
 
     title_text = "紀錄成功與今日進度" if last_logged_info else "今日攝取總計與進度"
@@ -262,7 +261,6 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
     return flex_json
 
 def parse_basic_profile(raw_text):
-    """只解析第一階段的基本數據：身高、體重、性別、目標"""
     parsed = {}
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
     if len(nums) >= 2:
@@ -304,7 +302,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg):
     蛋白質狀況：{protein} / {target_protein} g（正確還差：{rem_protein} g）
     用戶訊息："{user_msg}"
 
-    請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤）：
+    請判斷意圖並處理，輸出純 JSON 格式（嚴禁包含 ```json 標籤與 Emoji）：
 
     情境 A：用戶在【記錄飲食】（例如：我吃了排骨飯、剛剛在 7-11 喝了無糖豆漿）
     {{
@@ -387,12 +385,12 @@ def build_flex_card(data):
             "type": "box",
             "layout": "vertical",
             "contents": [
-                {"type": "text", "text": f"📊 {budget}", "weight": "bold", "size": "sm", "color": "#27AE60", "wrap": True},
+                {"type": "text", "text": budget, "weight": "bold", "size": "sm", "color": "#27AE60", "wrap": True},
                 {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "📝 進店直接點：", "weight": "bold", "size": "sm", "margin": "md"},
+                {"type": "text", "text": "進店直接點：", "weight": "bold", "size": "sm", "margin": "md"},
                 *items_contents,
                 {"type": "separator", "margin": "md"},
-                {"type": "text", "text": f"⚠️ 地雷與補充提醒：{warning}", "size": "xs", "color": "#E74C3C", "margin": "md", "wrap": True}
+                {"type": "text", "text": f"地雷與補充提醒：{warning}", "size": "xs", "color": "#E74C3C", "margin": "md", "wrap": True}
             ]
         },
         "footer": {
@@ -405,7 +403,7 @@ def build_flex_card(data):
                     "color": "#27AE60",
                     "action": {
                         "type": "postback",
-                        "label": f"📝 一鍵紀錄這餐 ({total_cal} kcal)",
+                        "label": f"一鍵紀錄這餐 ({total_cal} kcal)",
                         "data": f"action=log_meal&restaurant={restaurant}&title={safe_title}&cal={total_cal}&protein={total_protein}",
                         "displayText": f"我決定吃【{restaurant}】這套組合！"
                     }
@@ -446,7 +444,7 @@ def delete_last_meal(user_id):
         "total_protein_g": new_protein
     }).eq("id", daily_log_id).execute()
 
-    return f"🗑️ 已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
+    return f"已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
 
 def log_meal_to_supabase(user_id, intent_data):
     today = get_today_str()
@@ -522,7 +520,6 @@ def handle_postback(event):
     data = parse_qs(event.postback.data)
     action = data.get("action", [""])[0]
 
-    # 一鍵紀錄餐點
     if action == "log_meal":
         restaurant = data.get("restaurant", ["外食"])[0]
         title = data.get("title", ["精準餐點"])[0]
@@ -549,7 +546,6 @@ def handle_postback(event):
             )
             line_bot_api.reply_message(event.reply_token, flex_message)
 
-    # 步驟二：點選「活動程度」➔ 詢問「飲食模式」
     elif action == "step_activity":
         h = data.get("h", ["170"])[0]
         w = data.get("w", ["70"])[0]
@@ -558,14 +554,13 @@ def handle_postback(event):
         act = data.get("act", ["久坐辦公"])[0]
 
         q_items = [
-            QuickReplyButton(action=PostbackAction(label="🍽️ 一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
-            QuickReplyButton(action=PostbackAction(label="⏳ 168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
+            QuickReplyButton(action=PostbackAction(label="一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
+            QuickReplyButton(action=PostbackAction(label="168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
         ]
         
-        reply_text = f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】："
+        reply_text = f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】：\n（直接點選下方按鈕）"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=q_items)))
 
-    # 步驟三：點選「飲食模式」➔ 完成建檔寫入 Supabase
     elif action == "step_meal":
         h = float(data.get("h", [170])[0])
         w = float(data.get("w", [70])[0])
@@ -590,14 +585,14 @@ def handle_postback(event):
         new_profile = get_user_profile(line_user_id)
 
         reply_text = (
-            f"🎉 【專屬健康檔案建檔成功】\n\n"
-            f"🎯 目標模式：{goal}\n"
-            f"🏃 活動程度：{act}\n"
-            f"🍽️ 飲食習慣：{meal}\n\n"
-            f"📊 您的每日精準控制目標：\n"
+            f"【專屬健康檔案建檔成功】\n\n"
+            f"目標模式：{goal}\n"
+            f"活動程度：{act}\n"
+            f"飲食習慣：{meal}\n\n"
+            f"您的每日精準控制目標：\n"
             f"• 建議總熱量：約 {target_cal} kcal / 日\n"
             f"• 建議蛋白質：約 {target_protein} g / 日\n\n"
-            f"💡 直接輸入想吃的餐廳（如：麥當勞、7-11）即可獲取口袋菜單！"
+            f"提示：直接輸入想吃的餐廳（如：麥當勞、7-11）即可獲取口袋菜單！"
         )
         line_bot_api.reply_message(
             event.reply_token,
@@ -613,18 +608,16 @@ def handle_message(event):
 
     if user_msg == "修改檔案" or user_msg == "重新建檔":
         reply_text = (
-            "⚙️ 【重新建立專屬健康檔案】\n\n"
+            "【重新建立專屬健康檔案】\n\n"
             "請直接回覆第一階段基本數據：\n"
             "【身高 / 體重 / 性別 / 飲食目標】\n\n"
-            "💡 範例：173 / 85 / 男 / 增肌減脂"
+            "範例：173 / 85 / 男 / 增肌減脂"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
 
-    # 嘗試解析第一階段基本數據
     basic_profile = parse_basic_profile(user_msg)
 
-    # 若未建檔或輸入全新身體數據 ➔ 啟動步驟一（選活動程度）
     if not profile or basic_profile:
         if basic_profile:
             h = str(basic_profile["height_cm"])
@@ -633,30 +626,25 @@ def handle_message(event):
             goal = basic_profile["goal"]
 
             q_items = [
-                QuickReplyButton(action=PostbackAction(label="🪑 久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
-                QuickReplyButton(action=PostbackAction(label="🚶 時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
-                QuickReplyButton(action=PostbackAction(label="🏋️ 規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
-                QuickReplyButton(action=PostbackAction(label="🏗️ 重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
+                QuickReplyButton(action=PostbackAction(label="久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
+                QuickReplyButton(action=PostbackAction(label="時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
+                QuickReplyButton(action=PostbackAction(label="規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
+                QuickReplyButton(action=PostbackAction(label="重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
             ]
-            reply_text = f"收到您的基本數據！\n({h}cm / {w}kg / {g} / {goal})\n\n下一步，請選擇您的【日常活動程度】："
+            reply_text = f"收到您的基本數據！\n({h}cm / {w}kg / {g} / {goal})\n\n下一步，請選擇您的【日常活動程度】：\n（直接點選下方按鈕）"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=q_items)))
             return
         else:
             reply_text = (
-                "歡迎來到 BiteLogic 🥑！\n\n"
-                "首次使用請先建立專屬檔案 📝\n\n"
+                "歡迎來到 BiteLogic！\n\n"
+                "首次使用請先建立專屬檔案\n\n"
                 "請直接回覆基本數據：\n"
                 "【身高 / 體重 / 性別 / 飲食目標】\n\n"
-                "💡 範例：173 / 85 / 男 / 增肌減脂"
+                "範例：173 / 85 / 男 / 增肌減脂"
             )
-            quick_reply_demo = QuickReply(items=[
-                QuickReplyButton(action=MessageAction(label="📝 填寫範例A", text="173 / 85 / 男 / 減脂")),
-                QuickReplyButton(action=MessageAction(label="📝 填寫範例B", text="173 / 85 / 男 / 增肌減脂"))
-            ])
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply_demo))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             return
 
-    # 已建檔狀況下的日常對話處理
     try:
         user_id = profile["id"]
         p_text = profile.get("raw_profile_text", "")
