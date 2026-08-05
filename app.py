@@ -426,7 +426,6 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         return {"type": "chat", "reply_text": f"AI 連線處理失敗，原因：{str(e)[:50]}"}
 
 def build_flex_card(data):
-    """【圖二優化】：解析每個細項品項，為每一個餐點獨立顯示熱量與蛋白質」"""
     restaurant = data.get("restaurant", "外食推薦")
     title = data.get("title", "精準口袋菜單")
     
@@ -467,13 +466,13 @@ def build_flex_card(data):
             "wrap": True
         })
 
-    # 「一鍵紀錄」時寫入 Supabase 的真實餐點名稱組合（如：玫瑰油雞腿飯、單點滷排骨、單點滷蛋）
     if item_names_list:
         log_title = "、".join(item_names_list)
     else:
         log_title = title
 
-    safe_log_title = log_title[:25]  # postback 長度限制防護
+    # 放寬長度截斷至 65 字，確保所有品項皆可完整顯示
+    safe_log_title = log_title[:65]
 
     flex_json = {
         "type": "bubble",
@@ -768,7 +767,6 @@ def handle_message(event):
                 profile.get("goal"), raw_p_text, raw_p_text
             )
 
-        # 【圖一優化】：直接由 Python 精準條列輸出今日已吃餐點，零 Token 消耗、1. 2. 3. 清楚呈現真實品項！
         if any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
             meals = get_today_meals_list(user_id)
             if not meals:
