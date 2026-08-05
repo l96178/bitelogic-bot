@@ -15,20 +15,17 @@ from supabase import create_client, Client
 
 app = Flask(__name__)
 
-# 讀取環境變數
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# 初始化套件
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 台灣時區設定 (UTC+8)
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 SYSTEM_PROMPT = """
@@ -42,49 +39,63 @@ SYSTEM_PROMPT = """
 5. 【數字嚴格規範】：回答若提及熱量或蛋白質剩餘額度，必須完全照抄系統提供的「正確剩餘數字」，絕對禁止自己心算或隨意發明數字！
 """
 
-def calculate_precise_targets(weight_kg, height_cm, gender, goal, activity_level, meal_pattern):
-    """結合 BMR、TDEE 與健康底線保護機制的精準計算"""
+# 對齊 SQL 的 Goal 對照表
+GOAL_MAP_TO_DB = {
+    "減脂": "fat_loss",
+    "增肌": "muscle_gain",
+    "增肌減脂": "recomp"
+}
+
+GOAL_MAP_TO_DISP = {
+    "fat_loss": "減脂",
+    "muscle_gain": "增肌",
+    "recomp": "增肌減脂"
+}
+
+def format_num(val):
+    try:
+        f = float(val)
+        return int(f) if f.is_integer() else f
+    except Exception:
+        return val
+
+def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
     weight = float(weight_kg) if weight_kg else 70.0
     height = float(height_cm) if height_cm else 170.0
+    age_num = float(age) if age else 30.0
     
-    # BMR 計算 (Mifflin-St Jeor 公式)
     if gender == "女":
-        bmr = (10 * weight) + (6.25 * height) - (5 * 30) - 161
+        bmr = (10 * weight) + (6.25 * height) - (5 * age_num) - 161
         min_safe_cal = 1200
     else:
-        bmr = (10 * weight) + (6.25 * height) - (5 * 30) + 5
+        bmr = (10 * weight) + (6.25 * height) - (5 * age_num) + 5
         min_safe_cal = 1500
 
-    # PAL 活動係數計算
-    if "重度" in str(activity_level):
+    act_str = str(activity_level)
+    if "重度" in act_str:
         pal = 1.725
-    elif "規律" in str(activity_level) or "運動" in str(activity_level):
+    elif "規律" in act_str or "運動" in act_str:
         pal = 1.55
-    elif "走動" in str(activity_level) or "輕度" in str(activity_level):
+    elif "走動" in act_str or "輕度" in act_str:
         pal = 1.375
     else:
-        pal = 1.2  # 久坐辦公
+        pal = 1.2
 
     tdee = bmr * pal
-
-    # 目標熱量試算
     goal_str = str(goal)
-    if "增肌" in goal_str and "減脂" in goal_str:
-        target_cal = int(tdee * 0.85)
-    elif "增肌" in goal_str:
-        target_cal = int(tdee * 1.1)
+
+    if "muscle_gain" in goal_str or "增肌" in goal_str:
+        if "recomp" in goal_str or "減脂" in goal_str:
+            target_cal = int(tdee * 0.88)
+        else:
+            target_cal = int(tdee * 1.1)
     else:
         target_cal = int(tdee * 0.8)
 
-    # 安全保護機制
-    if weight >= 90:
-        target_cal = min(target_cal, int(weight * 20))
-        max_protein = 180
-    else:
-        target_cal = max(target_cal, min_safe_cal)
-        max_protein = 200
-
+    target_cal = max(target_cal, int(bmr + 50), min_safe_cal)
+    max_protein = 180 if weight >= 90 else 200
     target_protein = int(min(weight * 1.6, max_protein))
+    
     return target_cal, target_protein
 
 def get_quick_reply(user_id=None):
@@ -160,6 +171,8 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
             },
             {"type": "separator", "margin": "md"}
         ])
+
+    disp_goal = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
 
     body_contents.extend([
         {
@@ -247,7 +260,7 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
             "paddingAll": "lg",
             "contents": [
                 {"type": "text", "text": title_text, "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"目前模式：{goal or '健康減脂'}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+                {"type": "text", "text": f"目前模式：{disp_goal}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
             ]
         },
         "body": {
@@ -263,15 +276,28 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
 def parse_basic_profile(raw_text):
     parsed = {}
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
-    if len(nums) >= 2:
+    
+    if len(nums) >= 3:
         height_candidates = [n for n in nums if 50 <= n <= 250]
         weight_candidates = [n for n in nums if 20 <= n <= 300]
+        age_candidates = [n for n in nums if 10 <= n <= 100]
+
         if height_candidates:
-            parsed["height_cm"] = height_candidates[0]
+            parsed["height_cm"] = format_num(height_candidates[0])
         if weight_candidates:
             weights = [w for w in weight_candidates if w != parsed.get("height_cm")]
             if weights:
-                parsed["weight_kg"] = weights[0]
+                parsed["weight_kg"] = format_num(weights[0])
+        if age_candidates:
+            ages = [a for a in age_candidates if a != parsed.get("height_cm") and a != parsed.get("weight_kg")]
+            if ages:
+                parsed["age"] = format_num(ages[0])
+            else:
+                parsed["age"] = 30
+    elif len(nums) == 2:
+        parsed["height_cm"] = format_num(nums[0])
+        parsed["weight_kg"] = format_num(nums[1])
+        parsed["age"] = 30
 
     parsed["gender"] = "女" if "女" in raw_text else "男"
     
@@ -417,7 +443,7 @@ def get_today_str():
     return datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d")
 
 def get_user_profile(line_user_id):
-    res = supabase.table("profiles").select("id, raw_profile_text, height_cm, weight_kg, gender, goal").eq("line_user_id", line_user_id).execute()
+    res = supabase.table("profiles").select("id, raw_profile_text, height_cm, weight_kg, age, gender, goal, target_calories, target_protein_g").eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
 def delete_last_meal(user_id):
@@ -531,11 +557,8 @@ def handle_postback(event):
             intent_data = {"restaurant": restaurant, "food_name": title, "calories": cal, "protein_g": protein}
             food, c, p, total_c, total_p = log_meal_to_supabase(profile["id"], intent_data)
             
-            p_text = profile.get("raw_profile_text", "")
-            target_cal, target_protein = calculate_precise_targets(
-                profile.get("weight_kg"), profile.get("height_cm"), profile.get("gender"), 
-                profile.get("goal"), p_text, p_text
-            )
+            target_cal = profile.get("target_calories") or 2000
+            target_protein = profile.get("target_protein_g") or 150
 
             last_info = {"food": food, "cal": c, "protein": p}
             summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info=last_info)
@@ -549,13 +572,14 @@ def handle_postback(event):
     elif action == "step_activity":
         h = data.get("h", ["170"])[0]
         w = data.get("w", ["70"])[0]
+        a = data.get("a", ["30"])[0]
         g = data.get("g", ["男"])[0]
         goal = data.get("goal", ["減脂"])[0]
         act = data.get("act", ["久坐辦公"])[0]
 
         q_items = [
-            QuickReplyButton(action=PostbackAction(label="一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
-            QuickReplyButton(action=PostbackAction(label="168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
+            QuickReplyButton(action=PostbackAction(label="一天三餐", data=urlencode({"action": "step_meal", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": act, "meal": "一天三餐"}), display_text="我選擇：一天三餐")),
+            QuickReplyButton(action=PostbackAction(label="168斷食 (一天兩餐)", data=urlencode({"action": "step_meal", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": act, "meal": "168斷食(一天兩餐)"}), display_text="我選擇：168斷食(一天兩餐)"))
         ]
         
         reply_text = f"已設定活動程度：【{act}】\n\n最後一步，請選擇您的【飲食模式/餐數】：\n（直接點選下方按鈕）"
@@ -564,29 +588,35 @@ def handle_postback(event):
     elif action == "step_meal":
         h = float(data.get("h", [170])[0])
         w = float(data.get("w", [70])[0])
+        a = float(data.get("a", [30])[0])
         g = data.get("g", ["男"])[0]
-        goal = data.get("goal", ["減脂"])[0]
+        goal_text = data.get("goal", ["減脂"])[0]
         act = data.get("act", ["久坐辦公"])[0]
         meal = data.get("meal", ["一天三餐"])[0]
 
-        full_profile_text = f"身高{h}cm / 體重{w}kg / {g} / {goal} / {act} / {meal}"
+        db_goal = GOAL_MAP_TO_DB.get(goal_text, "fat_loss")
+        target_cal, target_protein = calculate_precise_targets(w, h, a, g, goal_text, act, meal)
+        full_profile_text = f"身高{format_num(h)}cm / 體重{format_num(w)}kg / {format_num(a)}歲 / {g} / {goal_text} / {act} / {meal}"
 
         payload = {
             "line_user_id": line_user_id,
             "raw_profile_text": full_profile_text,
-            "height_cm": h,
-            "weight_kg": w,
+            "height_cm": format_num(h),
+            "weight_kg": format_num(w),
+            "age": format_num(a),
             "gender": g,
-            "goal": goal
+            "goal": db_goal,
+            "target_calories": target_cal,
+            "target_protein_g": target_protein,
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
-        
-        target_cal, target_protein = calculate_precise_targets(w, h, g, goal, act, meal)
         new_profile = get_user_profile(line_user_id)
 
         reply_text = (
             f"【專屬健康檔案建檔成功】\n\n"
-            f"目標模式：{goal}\n"
+            f"基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲\n"
+            f"目標模式：{goal_text}\n"
             f"活動程度：{act}\n"
             f"飲食習慣：{meal}\n\n"
             f"您的每日精準控制目標：\n"
@@ -610,8 +640,8 @@ def handle_message(event):
         reply_text = (
             "【重新建立專屬健康檔案】\n\n"
             "請直接回覆第一階段基本數據：\n"
-            "【身高 / 體重 / 性別 / 飲食目標】\n\n"
-            "範例：173 / 85 / 男 / 增肌減脂"
+            "【身高 / 體重 / 年齡 / 性別 / 飲食目標】\n\n"
+            "範例：173 / 85 / 30 / 男 / 增肌減脂"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
@@ -622,16 +652,17 @@ def handle_message(event):
         if basic_profile:
             h = str(basic_profile["height_cm"])
             w = str(basic_profile["weight_kg"])
+            a = str(basic_profile.get("age", 30))
             g = basic_profile["gender"]
             goal = basic_profile["goal"]
 
             q_items = [
-                QuickReplyButton(action=PostbackAction(label="久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
-                QuickReplyButton(action=PostbackAction(label="時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
-                QuickReplyButton(action=PostbackAction(label="規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
-                QuickReplyButton(action=PostbackAction(label="重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
+                QuickReplyButton(action=PostbackAction(label="久坐辦公", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "久坐辦公"}), display_text="我選擇：久坐辦公")),
+                QuickReplyButton(action=PostbackAction(label="時常走動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "時常走動"}), display_text="我選擇：時常走動")),
+                QuickReplyButton(action=PostbackAction(label="規律運動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "規律運動"}), display_text="我選擇：規律運動")),
+                QuickReplyButton(action=PostbackAction(label="重度勞動", data=urlencode({"action": "step_activity", "h": h, "w": w, "a": a, "g": g, "goal": goal, "act": "重度勞動"}), display_text="我選擇：重度勞動"))
             ]
-            reply_text = f"收到您的基本數據！\n({h}cm / {w}kg / {g} / {goal})\n\n下一步，請選擇您的【日常活動程度】：\n（直接點選下方按鈕）"
+            reply_text = f"收到您的基本數據！\n({h}cm / {w}kg / {a}歲 / {g} / {goal})\n\n下一步，請選擇您的【日常活動程度】：\n（直接點選下方按鈕）"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=QuickReply(items=q_items)))
             return
         else:
@@ -639,20 +670,25 @@ def handle_message(event):
                 "歡迎來到 BiteLogic！\n\n"
                 "首次使用請先建立專屬檔案\n\n"
                 "請直接回覆基本數據：\n"
-                "【身高 / 體重 / 性別 / 飲食目標】\n\n"
-                "範例：173 / 85 / 男 / 增肌減脂"
+                "【身高 / 體重 / 年齡 / 性別 / 飲食目標】\n\n"
+                "範例：173 / 85 / 30 / 男 / 增肌減脂"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             return
 
     try:
         user_id = profile["id"]
-        p_text = profile.get("raw_profile_text", "")
-        
-        target_cal, target_protein = calculate_precise_targets(
-            profile.get("weight_kg"), profile.get("height_cm"), profile.get("gender"), 
-            profile.get("goal"), p_text, p_text
-        )
+        target_cal = profile.get("target_calories")
+        target_protein = profile.get("target_protein_g")
+
+        # 若舊用戶未存有目標，進行動態計算補齊
+        if not target_cal or not target_protein:
+            p_text = profile.get("raw_profile_text", "")
+            user_age = profile.get("age", 30)
+            target_cal, target_protein = calculate_precise_targets(
+                profile.get("weight_kg"), profile.get("height_cm"), user_age, profile.get("gender"), 
+                profile.get("goal"), p_text, p_text
+            )
 
         if user_msg == "刪除上一筆" or user_msg == "刪除紀錄":
             del_msg = delete_last_meal(user_id)
