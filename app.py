@@ -347,14 +347,18 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     A.飲食紀錄(type=log): 填 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
       硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
+      若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
       丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
       若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
       填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
     C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
     """
-    def _call(extra_note=""):
-        interaction = client.interactions.create(
+    # 查表命中 -> 用自建權威資料,不需搜尋;未命中 -> 開 Google Search 讓模型查即時資料,而非憑記憶猜
+    use_search = menu_str is None
+
+    def _call(extra_note="", with_search=use_search):
+        kwargs = dict(
             model="gemini-3.5-flash-lite",
             input=prompt + extra_note,
             response_format={
@@ -364,10 +368,22 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
             },
             store=False  # prompt 內含用戶身體數據，不留存於 Google 端
         )
+        if with_search:
+            kwargs["tools"] = [{"type": "google_search"}]
+        interaction = client.interactions.create(**kwargs)
         return getattr(interaction, "output_text", None) or (interaction.text if hasattr(interaction, 'text') else str(interaction))
 
     try:
-        res_text = _call()
+        try:
+            res_text = _call()
+        except Exception:
+            if use_search:
+                # 搜尋工具不可用(如未開計費)或與 structured output 併用失敗時，降級為純模型模式
+                print("⚠️ 含搜尋的呼叫失敗，降級為無搜尋重試：")
+                print(traceback.format_exc())
+                res_text = _call(with_search=False)
+            else:
+                raise
         if not res_text:
             return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
 
