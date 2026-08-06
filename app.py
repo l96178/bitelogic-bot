@@ -4,11 +4,13 @@ import json
 import traceback
 from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
+from typing import List, Literal, Optional
 from flask import Flask, request, abort
+from pydantic import BaseModel
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, 
+    MessageEvent, TextMessage, TextSendMessage,
     PostbackEvent, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction, PostbackAction
 )
 from google import genai  # 全新官方 SDK
@@ -36,6 +38,37 @@ SYSTEM_PROMPT = "你是 BiteLogic 外食 AI 顧問。純文字回答、無粗體
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
 
+# ============ 結構化輸出 Schema（取代 prompt 內 JSON 範例 + regex 清洗）============
+
+class RecItem(BaseModel):
+    name: str
+    cal: int
+    protein: int
+
+class AIResult(BaseModel):
+    """AI 意圖判斷結果。type 決定使用哪些欄位：
+    log -> restaurant/food_name/calories/protein_g
+    recommendation -> restaurant/title/budget/items/warning/total_cal/total_protein
+    chat -> reply_text
+    """
+    type: Literal["log", "recommendation", "chat"]
+    # log
+    restaurant: Optional[str] = None
+    food_name: Optional[str] = None
+    calories: Optional[int] = None
+    protein_g: Optional[int] = None
+    # recommendation
+    title: Optional[str] = None
+    budget: Optional[str] = None
+    items: Optional[List[RecItem]] = None
+    warning: Optional[str] = None
+    total_cal: Optional[int] = None
+    total_protein: Optional[int] = None
+    # chat
+    reply_text: Optional[str] = None
+
+# ================================================================================
+
 def format_num(val):
     try:
         f = float(val)
@@ -43,22 +76,35 @@ def format_num(val):
     except Exception:
         return val
 
-def extract_last_restaurant(raw_text):
-    if not raw_text: return None
-    match = re.search(r'上次餐廳：([^\s｜]+)', raw_text)
-    return match.group(1).strip() if match else None
+def update_last_restaurant(user_id, store_name):
+    """last_restaurant 改為 profiles 獨立欄位，不再塞在 raw_profile_text 裡用 regex 進出。"""
+    if not store_name or store_name == "null":
+        return
+    supabase.table("profiles").update({
+        "last_restaurant": store_name,
+        "last_restaurant_at": datetime.now(timezone.utc).isoformat()
+    }).eq("id", user_id).execute()
 
-def update_last_restaurant_in_profile(user_id, current_raw_text, store_name):
-    if not store_name or store_name == "null": return
-    cleaned_text = re.sub(r'\s*｜\s*上次餐廳：[^\s｜]+', '', current_raw_text or '').strip()
-    new_raw_text = f"{cleaned_text} ｜ 上次餐廳：{store_name}"
-    supabase.table("profiles").update({"raw_profile_text": new_raw_text}).eq("id", user_id).execute()
+def get_last_restaurant(profile, max_age_days=3):
+    """只沿用近幾天內的餐廳，避免上週吃的店影響今天的「調整」判斷。"""
+    store = profile.get("last_restaurant")
+    if not store:
+        return None
+    ts = profile.get("last_restaurant_at")
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - dt > timedelta(days=max_age_days):
+                return None
+        except Exception:
+            pass
+    return store
 
 def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
     weight = float(weight_kg) if weight_kg else 70.0
     height = float(height_cm) if height_cm else 170.0
     age_num = float(age) if age else 30.0
-    
+
     bmr = (10 * weight) + (6.25 * height) - (5 * age_num) + (-161 if gender == "女" else 5)
     min_safe_cal = 1200 if gender == "女" else 1500
 
@@ -76,7 +122,7 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     target_cal = max(target_cal, int(bmr + 50), min_safe_cal)
     max_protein = 180 if weight >= 90 else 200
     target_protein = int(min(weight * 1.6, max_protein))
-    
+
     return target_cal, target_protein
 
 def get_quick_reply(user_id=None):
@@ -203,17 +249,34 @@ def parse_basic_profile(raw_text):
     parsed["gender"] = "女" if "女" in raw_text else "男"
     return parsed if (parsed.get("height_cm") and parsed.get("weight_kg")) else None
 
+def get_or_create_daily_log_id(user_id):
+    today = get_today_str()
+    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
+    if log_res.data:
+        return log_res.data[0]["id"]
+    new_log = supabase.table("daily_logs").insert({"user_id": user_id, "log_date": today}).execute()
+    return new_log.data[0]["id"]
+
 def get_today_meals_list(user_id):
     today = get_today_str()
     log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
     if not log_res.data: return []
-    meals_res = supabase.table("meal_items").select("food_name, calories, protein_g").eq("daily_log_id", log_res.data[0]["id"]).order("created_at", desc=False).execute()
+    meals_res = supabase.table("meal_items").select("id, food_name, calories, protein_g").eq("daily_log_id", log_res.data[0]["id"]).order("created_at", desc=False).execute()
     return meals_res.data if meals_res.data else []
+
+def get_today_summary(user_id):
+    """總計改為讀取時從 meal_items 加總（單一資料來源），不再維護 daily_logs 上的累計欄位，
+    避免「讀取→加減→寫回」的併發覆寫問題。"""
+    meals = get_today_meals_list(user_id)
+    return (
+        sum(int(m.get("calories") or 0) for m in meals),
+        sum(int(m.get("protein_g") or 0) for m in meals),
+    )
 
 def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
-    
+
     rem_cal, rem_protein = max(0, target_cal - cal), max(0, target_protein - protein)
     logged_count = len(today_meals) if today_meals else 0
     total_planned_meals = 2 if ("168" in profile_str or "兩餐" in profile_str) else 3
@@ -222,7 +285,6 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
-    # 精準對 JSON 範例的大括號進行轉義
     prompt = f"""
     {SYSTEM_PROMPT}
 
@@ -230,64 +292,52 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
     用戶說:"{user_msg}"
 
-    判斷意圖，僅輸出純 JSON:
-    A.飲食紀錄: {{"type":"log","restaurant":"連鎖店或null","food_name":"名稱","calories":整數,"protein_g":整數}}
-    B.餐廳推薦/調整: 設計約{meal_cal_cap}kcal/{meal_protein_cap}g蛋白質組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
-    {{"type":"recommendation","restaurant":"店名","title":"10字內主題","budget":"單餐目標{meal_cal_cap}kcal","items":[{{"name":"單品名","cal":整數,"protein":整數}}],"warning":"避坑提示","total_cal":整數,"total_protein":整數}}
-    C.一般對話/問額度: {{"type":"chat","reply_text":"精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)"}}
+    判斷意圖，依 schema 輸出對應欄位:
+    A.飲食紀錄(type=log): 填 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g。
+    B.餐廳推薦/調整(type=recommendation): 設計約{meal_cal_cap}kcal/{meal_protein_cap}g蛋白質組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
+      填 restaurant、title(10字內主題)、budget(如"單餐目標{meal_cal_cap}kcal")、items(每項含name/cal/protein)、warning(避坑提示)、total_cal、total_protein。
+    C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
     """
     try:
         interaction = client.interactions.create(
             model="gemini-3.5-flash-lite",
-            input=prompt
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": AIResult.model_json_schema()
+            },
+            store=False  # prompt 內含用戶身體數據，不留存於 Google 端
         )
-        res_text = interaction.text if hasattr(interaction, 'text') else str(interaction)
-        if not res_text: 
+        res_text = getattr(interaction, "output_text", None) or (interaction.text if hasattr(interaction, 'text') else str(interaction))
+        if not res_text:
             return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
-        
-        # 1. 移除 Markdown 程式碼標記
-        cleaned = re.sub(r'^```json\s*|\s*```$', '', res_text.strip(), flags=re.MULTILINE).strip()
-        
-        # 2. 使用 raw_decode 從第一個 '{' 開始解析，無視後面多餘的雜訊
-        start_idx = cleaned.find('{')
-        if start_idx != -1:
-            try:
-                decoder = json.JSONDecoder()
-                obj, _ = decoder.raw_decode(cleaned[start_idx:])
-                return obj
-            except Exception as parse_err:
-                print(f"⚠️ raw_decode 解析失敗: {parse_err}")
 
-        return {"type": "chat", "reply_text": cleaned}
+        result = AIResult.model_validate_json(res_text)
+        return result.model_dump()
 
-    except Exception as e:
+    except Exception:
         print("❌ Interactions API 完整報錯細節：")
         print(traceback.format_exc())
-        return {"type": "chat", "reply_text": f"AI 連線失敗：{str(e)}"}
+        return {"type": "chat", "reply_text": "AI 連線失敗，請稍後重試。"}
 
-def build_flex_card(data):
-    restaurant = data.get("restaurant", "外食推薦")
-    title = data.get("title", "精準口袋菜單")
-    budget = data.get("budget", "符合個人每日熱量控制")
-    items = data.get("items", [])
-    warning = data.get("warning", "注意適量攝取")
-    total_cal = data.get("total_cal", 500)
-    total_protein = data.get("total_protein", 30)
+def build_flex_card(data, rec_id):
+    """postback 只帶 rec_id，餐點內容落地在 pending_recommendations，
+    避免中文 urlencode 後撞上 LINE postback data 300 字元上限，也避免店名/品名含 & = 時 parse_qs 解壞。"""
+    restaurant = data.get("restaurant") or "外食推薦"
+    title = data.get("title") or "精準口袋菜單"
+    budget = data.get("budget") or "符合個人每日熱量控制"
+    items = data.get("items") or []
+    warning = data.get("warning") or "注意適量攝取"
+    total_cal = data.get("total_cal") or 500
 
-    items_contents, item_names_list = [], []
-
+    items_contents = []
     for item in items:
         if isinstance(item, dict):
             name, c, p = item.get("name", "餐點"), item.get("cal", 0), item.get("protein", 0)
             items_contents.append({"type": "text", "text": f"• {name} (約 {c} kcal / {p}g 蛋白質)", "size": "sm", "color": "#555555", "margin": "xs", "wrap": True})
-            item_names_list.append(name)
         elif isinstance(item, str):
-            clean_name = item.split("(")[0].replace("•", "").strip() if "(" in item else item.replace("•", "").strip()
             items_contents.append({"type": "text", "text": f"• {item}" if not item.startswith("•") else item, "size": "sm", "color": "#555555", "margin": "xs", "wrap": True})
-            item_names_list.append(clean_name)
-
-    log_title = "、".join(item_names_list) if item_names_list else title
-    safe_log_title = log_title[:65]
 
     return {
         "type": "bubble",
@@ -317,7 +367,7 @@ def build_flex_card(data):
                     "action": {
                         "type": "postback",
                         "label": f"一鍵紀錄這餐 ({total_cal} kcal)",
-                        "data": f"action=log_meal&restaurant={restaurant}&title={safe_log_title}&cal={total_cal}&protein={total_protein}",
+                        "data": f"action=log_meal&rec_id={rec_id}",
                         "displayText": f"我決定吃【{restaurant}】這套組合！"
                     }
                 }
@@ -325,55 +375,49 @@ def build_flex_card(data):
         }
     }
 
+def save_pending_recommendation(user_id, ai_res):
+    """推薦內容落地，回傳 rec_id 供 postback 使用。"""
+    res = supabase.table("pending_recommendations").insert({
+        "user_id": user_id,
+        "payload": json.dumps(ai_res, ensure_ascii=False)
+    }).execute()
+    return res.data[0]["id"]
+
+def get_pending_recommendation(rec_id):
+    res = supabase.table("pending_recommendations").select("user_id, payload").eq("id", rec_id).execute()
+    if not res.data:
+        return None
+    row = res.data[0]
+    payload = json.loads(row["payload"])
+    payload["_user_id"] = row["user_id"]
+    return payload
+
 def get_today_str(): return datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d")
 
 def get_user_profile(line_user_id):
-    res = supabase.table("profiles").select("id, raw_profile_text, height_cm, weight_kg, age, gender, goal, target_calories, target_protein_g").eq("line_user_id", line_user_id).execute()
+    res = supabase.table("profiles").select(
+        "id, raw_profile_text, height_cm, weight_kg, age, gender, goal, target_calories, target_protein_g, last_restaurant, last_restaurant_at"
+    ).eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
 def delete_last_meal(user_id):
-    today = get_today_str()
-    log_res = supabase.table("daily_logs").select("id, total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
-    if not log_res.data: return "今日尚無任何紀錄可刪除。"
-    
-    daily_log_id = log_res.data[0]["id"]
-    meal_res = supabase.table("meal_items").select("id, food_name, calories, protein_g").eq("daily_log_id", daily_log_id).order("id", desc=True).limit(1).execute()
-    if not meal_res.data: return "今日尚無飲食項目可刪除。"
+    meals = get_today_meals_list(user_id)
+    if not meals: return "今日尚無任何紀錄可刪除。"
 
-    last_meal = meal_res.data[0]
+    last_meal = meals[-1]
     supabase.table("meal_items").delete().eq("id", last_meal["id"]).execute()
-
-    new_cals = max(0, (log_res.data[0]["total_calories"] or 0) - last_meal["calories"])
-    new_protein = max(0, (log_res.data[0]["total_protein_g"] or 0) - last_meal["protein_g"])
-    supabase.table("daily_logs").update({"total_calories": new_cals, "total_protein_g": new_protein}).eq("id", daily_log_id).execute()
-
     return f"已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
 
 def log_meal_to_supabase(user_id, intent_data):
-    today = get_today_str()
-    cals, protein = int(intent_data.get("calories", 0)), int(intent_data.get("protein_g", 0))
-    restaurant, food_name_raw = intent_data.get("restaurant"), intent_data.get("food_name", "未知餐點")
+    cals, protein = int(intent_data.get("calories") or 0), int(intent_data.get("protein_g") or 0)
+    restaurant, food_name_raw = intent_data.get("restaurant"), intent_data.get("food_name") or "未知餐點"
     full_food_name = f"【{restaurant}】{food_name_raw}" if (restaurant and restaurant != "null") else food_name_raw
 
-    log_res = supabase.table("daily_logs").select("id, total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
-    if log_res.data:
-        daily_log_id = log_res.data[0]["id"]
-        current_cals, current_protein = log_res.data[0]["total_calories"] or 0, log_res.data[0]["total_protein_g"] or 0
-    else:
-        new_log = supabase.table("daily_logs").insert({"user_id": user_id, "log_date": today, "total_calories": 0, "total_protein_g": 0}).execute()
-        daily_log_id, current_cals, current_protein = new_log.data[0]["id"], 0, 0
-
+    daily_log_id = get_or_create_daily_log_id(user_id)
     supabase.table("meal_items").insert({"daily_log_id": daily_log_id, "meal_type": "snack", "food_name": full_food_name, "calories": cals, "protein_g": protein}).execute()
 
-    new_cals, new_protein = current_cals + cals, current_protein + protein
-    supabase.table("daily_logs").update({"total_calories": new_cals, "total_protein_g": new_protein}).eq("id", daily_log_id).execute()
-
+    new_cals, new_protein = get_today_summary(user_id)
     return full_food_name, cals, protein, new_cals, new_protein
-
-def get_today_summary(user_id):
-    today = get_today_str()
-    res = supabase.table("daily_logs").select("total_calories, total_protein_g").eq("user_id", user_id).eq("log_date", today).execute()
-    return (res.data[0]["total_calories"], res.data[0]["total_protein_g"]) if res.data else (0, 0)
 
 @app.route("/", methods=['GET'])
 def health_check(): return 'BiteLogic API is running', 200
@@ -393,18 +437,29 @@ def handle_postback(event):
     action = data.get("action", [""])[0]
 
     if action == "log_meal":
-        restaurant = data.get("restaurant", ["外食"])[0]
-        title = data.get("title", ["精準餐點"])[0]
-        cal, protein = int(data.get("cal", [0])[0]), int(data.get("protein", [0])[0])
-        
+        rec_id = data.get("rec_id", [""])[0]
+        rec = get_pending_recommendation(rec_id) if rec_id else None
         profile = get_user_profile(line_user_id)
-        if profile:
-            intent_data = {"restaurant": restaurant, "food_name": title, "calories": cal, "protein_g": protein}
-            food, c, p, total_c, total_p = log_meal_to_supabase(profile["id"], intent_data)
-            target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
 
-            summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
+        if not rec or not profile:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這張推薦卡片已過期，請重新輸入餐廳名稱取得新菜單。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
+            return
+
+        items = rec.get("items") or []
+        item_names = [i.get("name", "餐點") if isinstance(i, dict) else str(i) for i in items]
+        log_title = "、".join(item_names) if item_names else (rec.get("title") or "精準餐點")
+
+        intent_data = {
+            "restaurant": rec.get("restaurant"),
+            "food_name": log_title,
+            "calories": rec.get("total_cal") or 0,
+            "protein_g": rec.get("total_protein") or 0
+        }
+        food, c, p, total_c, total_p = log_meal_to_supabase(profile["id"], intent_data)
+        target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
+
+        summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
+        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "step_goal":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
@@ -513,8 +568,12 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="BiteLogic 今日攝取進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
             return
 
-        last_restaurant = extract_last_restaurant(raw_p_text)
-        today_stats, today_meals = get_today_summary(user_id), get_today_meals_list(user_id)
+        last_restaurant = get_last_restaurant(profile)
+        today_meals = get_today_meals_list(user_id)
+        today_stats = (
+            sum(int(m.get("calories") or 0) for m in today_meals),
+            sum(int(m.get("protein_g") or 0) for m in today_meals),
+        )
 
         ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals)
         msg_type = ai_res.get("type")
@@ -525,7 +584,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
-            if rec_store and rec_store != "null": update_last_restaurant_in_profile(user_id, raw_p_text, rec_store)
+            if rec_store and rec_store != "null": update_last_restaurant(user_id, rec_store)
 
             cals, _ = today_stats
             if cals >= target_cal:
@@ -536,10 +595,11 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id)))
                 return
 
-            flex_content = build_flex_card(ai_res)
+            rec_id = save_pending_recommendation(user_id, ai_res)
+            flex_content = build_flex_card(ai_res, rec_id)
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text", "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集"), quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集", quick_reply=get_quick_reply(user_id)))
 
     except Exception as e:
         print("❌ 處理訊息失敗系統 Log：")
