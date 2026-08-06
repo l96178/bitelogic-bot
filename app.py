@@ -131,10 +131,11 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     return target_cal, target_protein
 
 def get_quick_reply(user_id=None):
-    items = [
+    base_items = [
         QuickReplyButton(action=MessageAction(label="今日卡路里", text="查看今日卡路里")),
         QuickReplyButton(action=MessageAction(label="修改個人檔案", text="修改檔案"))
     ]
+    store_items = []
     if user_id:
         try:
             thirty_days_ago = (datetime.now(TAIWAN_TZ) - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -150,10 +151,17 @@ def get_quick_reply(user_id=None):
                             s = match.group(1).strip()
                             freq[s] = freq.get(s, 0) + 1
                     for store in sorted(freq, key=freq.get, reverse=True)[:3]:
-                        items.append(QuickReplyButton(action=MessageAction(label=f"{store}推薦", text=f"{store}推薦")))
+                        store_items.append(QuickReplyButton(action=MessageAction(label=f"{store}推薦", text=f"{store}推薦")))
         except Exception:
             pass
-    return QuickReply(items=items)
+    # 尚無飲食紀錄（如剛建檔完）時給預設起手式，讓用戶點一下就能體驗核心功能；
+    # 一旦有紀錄，自動被個人常用店取代
+    if not store_items:
+        store_items = [
+            QuickReplyButton(action=MessageAction(label="7-11推薦", text="7-11推薦")),
+            QuickReplyButton(action=MessageAction(label="全家推薦", text="全家推薦"))
+        ]
+    return QuickReply(items=store_items + base_items)
 
 def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, last_logged_info=None):
     rem_cal = max(0, target_cal - cals)
@@ -627,7 +635,7 @@ def handle_postback(event):
             f"【專屬健康檔案建檔成功】\n\n基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲\n"
             f"目標模式：{goal_text}\n活動程度：{act}\n飲食習慣：{meal}\n\n"
             f"您的每日精準控制目標：\n• 建議總熱量：約 {target_cal} kcal / 日\n• 建議蛋白質：約 {target_protein} g / 日\n\n"
-            f"提示：直接輸入想吃的餐廳（如：麥當勞、7-11）即可獲取口袋菜單！"
+            f"提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳（如：麥當勞、sukiya）！"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None)))
 
