@@ -4,9 +4,9 @@ import json
 import traceback
 from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
-from typing import List, Literal, Optional
+from typing import Annotated, List, Literal, Optional, Union
 from flask import Flask, request, abort
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, TypeAdapter
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
@@ -38,34 +38,40 @@ SYSTEM_PROMPT = "你是 BiteLogic 外食 AI 顧問。純文字回答、無粗體
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
 
-# ============ 結構化輸出 Schema（取代 prompt 內 JSON 範例 + regex 清洗）============
+# ============ 結構化輸出 Schema（判別聯集：每種意圖各自定義必填欄位）============
 
 class RecItem(BaseModel):
-    name: str
+    name: str = Field(description="單品名稱")
     cal: int
     protein: int
 
-class AIResult(BaseModel):
-    """AI 意圖判斷結果。type 決定使用哪些欄位：
-    log -> restaurant/food_name/calories/protein_g
-    recommendation -> restaurant/title/budget/items/warning/total_cal/total_protein
-    chat -> reply_text
-    """
-    type: Literal["log", "recommendation", "chat"]
-    # log
-    restaurant: Optional[str] = None
-    food_name: Optional[str] = None
-    calories: Optional[int] = None
-    protein_g: Optional[int] = None
-    # recommendation
-    title: Optional[str] = None
-    budget: Optional[str] = None
-    items: Optional[List[RecItem]] = None
-    warning: Optional[str] = None
-    total_cal: Optional[int] = None
-    total_protein: Optional[int] = None
-    # chat
-    reply_text: Optional[str] = None
+class LogResult(BaseModel):
+    """用戶回報吃了什麼 → 寫入飲食紀錄"""
+    type: Literal["log"]
+    restaurant: Optional[str] = Field(default=None, description="連鎖店名，非連鎖填 null")
+    food_name: str
+    calories: int
+    protein_g: int
+
+class RecommendationResult(BaseModel):
+    """用戶想知道某餐廳怎麼點 → 產生口袋菜單。items 為菜單本體，必須列出 1~5 個具體單品。"""
+    type: Literal["recommendation"]
+    restaurant: str
+    title: str = Field(description="10字內主題")
+    budget: str = Field(description="如：單餐目標600kcal")
+    items: List[RecItem] = Field(min_length=1, max_length=5, description="進店直接點的具體品項清單，絕不可為空")
+    warning: str = Field(description="避坑提示")
+    total_cal: int
+    total_protein: int
+
+class ChatResult(BaseModel):
+    """一般對話或詢問剩餘額度"""
+    type: Literal["chat"]
+    reply_text: str
+
+AIResultAdapter = TypeAdapter(
+    Annotated[Union[LogResult, RecommendationResult, ChatResult], Field(discriminator="type")]
+)
 
 # ================================================================================
 
@@ -298,23 +304,35 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
       填 restaurant、title(10字內主題)、budget(如"單餐目標{meal_cal_cap}kcal")、items(每項含name/cal/protein)、warning(避坑提示)、total_cal、total_protein。
     C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
     """
-    try:
+    def _call(extra_note=""):
         interaction = client.interactions.create(
             model="gemini-3.5-flash-lite",
-            input=prompt,
+            input=prompt + extra_note,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
-                "schema": AIResult.model_json_schema()
+                "schema": AIResultAdapter.json_schema()
             },
             store=False  # prompt 內含用戶身體數據，不留存於 Google 端
         )
-        res_text = getattr(interaction, "output_text", None) or (interaction.text if hasattr(interaction, 'text') else str(interaction))
+        return getattr(interaction, "output_text", None) or (interaction.text if hasattr(interaction, 'text') else str(interaction))
+
+    try:
+        res_text = _call()
         if not res_text:
             return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
 
-        result = AIResult.model_validate_json(res_text)
-        return result.model_dump()
+        result = AIResultAdapter.validate_python(json.loads(res_text)).model_dump()
+
+        # 防線：若判為推薦但菜單仍為空，帶著糾正指令重試一次
+        if result["type"] == "recommendation" and not result.get("items"):
+            print("⚠️ recommendation 缺 items，重試一次")
+            res_text = _call("\n注意：items 是菜單本體，必須列出 1~5 個具體單品（含名稱/熱量/蛋白質），不可為空。")
+            result = AIResultAdapter.validate_python(json.loads(res_text)).model_dump()
+            if result["type"] == "recommendation" and not result.get("items"):
+                return {"type": "chat", "reply_text": f"這家店的菜單資訊暫時生成失敗，請再傳一次「{user_msg}」試試。"}
+
+        return result
 
     except Exception:
         print("❌ Interactions API 完整報錯細節：")
