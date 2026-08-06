@@ -396,7 +396,7 @@ def parse_basic_profile(raw_text, strict=False):
             # 物理上不可能（如 105cm/180kg，BMI 163）-> 幾乎確定是順序寫反
             return {"error": (f"我讀到的是身高 {format_num(h)} 公分、體重 {format_num(w)} 公斤，"
                               f"這個組合應該是順序寫反了。\n\n"
-                              f"請照這個順序再傳一次：\n【身高 / 體重】\n範例：180 / 105")}
+                              f"請照這個順序再傳一次：\n【身高 / 體重】\n範例：170 / 60")}
         if not (BMI_COMMON[0] <= bmi <= BMI_COMMON[1]):
             # 少見但完全可能存在 -> 只做確認，不擋、不評論體型
             parsed["needs_confirm"] = True
@@ -411,9 +411,9 @@ def parse_basic_profile(raw_text, strict=False):
             return {"error": (f"我收到的{label}是 {val} {unit}，這超出我目前能處理的範圍"
                               f"（{format_num(lo)}～{format_num(hi)} {unit}）。\n\n"
                               f"如果數字沒打錯，這個情況建議直接找營養師或醫師協助，"
-                              f"會比我這個工具更適合你。若是打錯了，再傳一次即可：\n【身高 / 體重】\n範例：180 / 105")}
+                              f"會比我這個工具更適合你。若是打錯了，再傳一次即可：\n【身高 / 體重】\n範例：170 / 60")}
         return {"error": (f"還缺少「{label}」。\n\n"
-                          f"請一次提供兩個數字：\n【身高 / 體重】\n範例：180 / 105")}
+                          f"請一次提供兩個數字：\n【身高 / 體重】\n範例：170 / 60")}
 
     # 5) 年齡缺漏 -> 標記待詢問（不預設）
     if not parsed.get("age"):
@@ -1225,7 +1225,7 @@ def handle_message(event):
     profile = get_user_profile(line_user_id)
 
     if user_msg in ["修改檔案", "重新建檔"]:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="【重新建立專屬健康檔案】\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：180 / 105"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="【重新建立專屬健康檔案】\n\n第 1 步：\n\n請直接回覆您的【身高 / 體重】\n\n範例：170 / 60"))
         return
 
     basic_profile = parse_basic_profile(user_msg, strict=bool(profile))
