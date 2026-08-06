@@ -1256,7 +1256,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g, prefix=known))
             return
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="歡迎來到 BiteLogic！\n\n首次使用請先建立專屬檔案，共 3 個步驟，約 20 秒完成。\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：180 / 105"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="歡迎來到 BiteLogic！\n\n首次使用請先建立專屬檔案，共 3 個步驟，約 20 秒完成。\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：170 / 60"))
             return
 
     try:
