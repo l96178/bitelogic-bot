@@ -811,7 +811,7 @@ def handle_postback(event):
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
 
         meals_now = get_today_meals_list(profile["id"])
-        summary_flex = build_today_card(meals_now, total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
+        summary_flex = build_today_card(meals_now, cals=total_c, protein=total_p, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
         line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "reroll":
@@ -959,7 +959,7 @@ def handle_message(event):
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
-            today_flex = build_today_card(meals, cals, protein, target_cal, target_protein, profile.get("goal"))
+            today_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
@@ -970,7 +970,7 @@ def handle_message(event):
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
-            summary_flex = build_today_card(meals, cals, protein, target_cal, target_protein, profile.get("goal"))
+            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
             line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
@@ -1009,13 +1009,13 @@ def handle_message(event):
                         sum(int(m.get("calories") or 0) for m in meals_now),
                         sum(int(m.get("protein_g") or 0) for m in meals_now),
                     )
-                    summary_flex = build_today_card(meals_now, total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": corrected["food_name"], "cal": corrected["calories"], "protein": corrected["protein_g"]}, info_label="已更正最近一筆紀錄")
+                    summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": corrected["food_name"], "cal": corrected["calories"], "protein": corrected["protein_g"]}, info_label="已更正最近一筆紀錄")
                     line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
                     return
                 # 今日無紀錄可更正 -> 往下當成新紀錄寫入
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
             meals_now = get_today_meals_list(user_id)
-            summary_flex = build_today_card(meals_now, total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
+            summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
