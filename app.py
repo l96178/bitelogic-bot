@@ -507,7 +507,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
       若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
-      硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
+      硬性規則(份量最優先): 用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal，因此**這一餐必須吃到 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal**。給出明顯低於此區間的組合是嚴重錯誤(會害用戶下一餐被迫暴食)，寧可份量加大、加點主食或加倍肉量，也不可湊出一份 400~600 kcal 的輕食。total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
       丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
@@ -591,6 +591,38 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
                 rec_store = (result.get("restaurant") or "").lower() if result["type"] == "recommendation" else ""
                 if result["type"] == "recommendation" and es not in rec_store and rec_store not in es:
                     return {"type": "chat", "reply_text": f"抱歉，剛剛推薦錯店了。請再傳一次「{explicit_store}推薦」。"}
+
+        # 防線5：份量檢查。prompt 的區間規則只是建議，模型常給出遠低於單餐目標的組合
+        # （如兩餐制卻只推 464/1030 kcal，等於逼用戶下一餐吃 1600）。此處由代碼驗證並要求補足。
+        if result["type"] == "recommendation" and result.get("items"):
+            def _sum_items(res):
+                its = res.get("items") or []
+                return (
+                    sum(int(i.get("cal") or 0) for i in its if isinstance(i, dict)),
+                    sum(int(i.get("protein") or 0) for i in its if isinstance(i, dict)),
+                )
+
+            floor_cal = int(meal_cal_cap * 0.8)
+            sum_cal, sum_pro = _sum_items(result)
+            if sum_cal < floor_cal:
+                print(f"⚠️ 推薦份量不足({sum_cal} < {floor_cal})，要求補足重試")
+                res_text = _call(
+                    f"\n份量不足糾正：你上一組只有 {sum_cal} kcal，但用戶這餐的目標是 {meal_cal_cap} kcal"
+                    f"（一天只吃 {total_planned_meals} 餐，剩 {remaining_meals} 餐要分完 {rem_cal} kcal）。"
+                    f"請加大份量或增加品項，讓 items 的熱量總和落在 {floor_cal}~{meal_cal_cap} kcal 之間，"
+                    f"蛋白質總和至少 {int(meal_protein_cap*0.8)}g。不可再給明顯低於目標的組合。"
+                )
+                retried = _parse(res_text)
+                if retried["type"] == "recommendation" and retried.get("items"):
+                    r_cal, _ = _sum_items(retried)
+                    # 取較接近目標的那一組
+                    if abs(r_cal - meal_cal_cap) < abs(sum_cal - meal_cal_cap):
+                        result = retried
+
+            # 卡片與紀錄一律以品項實際加總為準，避免 AI 自報的 total 與清單對不上
+            sum_cal, sum_pro = _sum_items(result)
+            if sum_cal > 0:
+                result["total_cal"], result["total_protein"] = sum_cal, sum_pro
 
         # budget 字串由代碼決定性生成（含蛋白質目標），不交給 AI 自由發揮
         if result["type"] == "recommendation":
