@@ -180,7 +180,7 @@ def _section_caption(text):
 def build_profile_flex_card(profile):
     """個人檔案卡片(含 BMR/TDEE 推導)。"""
     raw = profile.get("raw_profile_text") or ""
-    h, w, a, g = profile.get("height_cm"), profile.get("weight_kg"), profile.get("age") or 30, profile.get("gender") or "男"
+    h, w, a, g = profile.get("height_cm"), profile.get("weight_kg"), get_effective_age(profile), profile.get("gender") or "男"
     goal_disp = GOAL_MAP_TO_DISP.get(profile.get("goal"), profile.get("goal")) or "減脂"
 
     parts = [p.strip() for p in raw.split("/")]
@@ -396,7 +396,7 @@ def parse_basic_profile(raw_text, strict=False):
             # 物理上不可能（如 105cm/180kg，BMI 163）-> 幾乎確定是順序寫反
             return {"error": (f"我讀到的是身高 {format_num(h)} 公分、體重 {format_num(w)} 公斤，"
                               f"這個組合應該是順序寫反了。\n\n"
-                              f"請照這個順序再傳一次：\n【身高 / 體重】\n範例：170 / 60")}
+                              f"請照這個順序再傳一次：\n【身高 / 體重】\n範例：180 / 105")}
         if not (BMI_COMMON[0] <= bmi <= BMI_COMMON[1]):
             # 少見但完全可能存在 -> 只做確認，不擋、不評論體型
             parsed["needs_confirm"] = True
@@ -411,9 +411,9 @@ def parse_basic_profile(raw_text, strict=False):
             return {"error": (f"我收到的{label}是 {val} {unit}，這超出我目前能處理的範圍"
                               f"（{format_num(lo)}～{format_num(hi)} {unit}）。\n\n"
                               f"如果數字沒打錯，這個情況建議直接找營養師或醫師協助，"
-                              f"會比我這個工具更適合你。若是打錯了，再傳一次即可：\n【身高 / 體重】\n範例：170 / 60")}
+                              f"會比我這個工具更適合你。若是打錯了，再傳一次即可：\n【身高 / 體重】\n範例：180 / 105")}
         return {"error": (f"還缺少「{label}」。\n\n"
-                          f"請一次提供兩個數字：\n【身高 / 體重】\n範例：170 / 60")}
+                          f"請一次提供兩個數字：\n【身高 / 體重】\n範例：180 / 105")}
 
     # 5) 年齡缺漏 -> 標記待詢問（不預設）
     if not parsed.get("age"):
@@ -431,7 +431,10 @@ def parse_basic_profile(raw_text, strict=False):
 
 def build_age_quick_reply(h, w, g):
     """年齡缺漏時的補問按鈕（取區間中位數，誤差約 ±5 歲 ≈ 25 kcal）。"""
-    opts = [("20-29 歲", 25), ("30-39 歲", 35), ("40-49 歲", 45), ("50 歲以上", 55)]
+    # 每格 10 歲、取中位數，誤差約 ±24 kcal（目標的 1%）。
+    # 特別拆開 50 以上：原本單一格會把 75 歲當 55 歲，每日多給近 100 kcal。
+    opts = [("20 歲以下", 18), ("20-29 歲", 25), ("30-39 歲", 35), ("40-49 歲", 45),
+            ("50-59 歲", 55), ("60-69 歲", 65), ("70 歲以上", 75)]
     return QuickReply(items=[
         QuickReplyButton(action=PostbackAction(
             label=lab,
@@ -457,6 +460,19 @@ def build_next_step_reply(h, w, a, g, prefix=""):
     return TextSendMessage(
         text=f"{prefix}請選擇您的【飲食目標】：\n（直接點選下方按鈕）",
         quick_reply=build_goal_quick_reply(h, w, a, g))
+
+def get_effective_age(profile):
+    """年齡以出生年動態換算，避免建檔後逐年漂移（每年 5 kcal）。
+    舊資料沒有 birth_year 時退回靜態 age 欄位。"""
+    by = profile.get("birth_year")
+    if by:
+        try:
+            age = datetime.now(TAIWAN_TZ).year - int(by)
+            if 10 <= age <= 110:
+                return age
+        except Exception:
+            pass
+    return profile.get("age") or 30
 
 def build_goal_quick_reply(h, w, a, g):
     """飲食目標選擇按鈕，建檔流程與性別補問後共用。"""
@@ -508,7 +524,7 @@ def log_weight(user_id, weight, profile):
     raw_p_text = profile.get("raw_profile_text") or ""
     new_raw = re.sub(r'體重\d+(?:\.\d+)?kg', f'體重{format_num(weight)}kg', raw_p_text) if '體重' in raw_p_text else raw_p_text
     new_target_cal, new_target_protein = calculate_precise_targets(
-        weight, profile.get("height_cm"), profile.get("age", 30), profile.get("gender"),
+        weight, profile.get("height_cm"), get_effective_age(profile), profile.get("gender"),
         profile.get("goal"), raw_p_text, raw_p_text
     )
     supabase.table("profiles").update({
@@ -994,7 +1010,7 @@ def get_today_str(): return datetime.now(TAIWAN_TZ).strftime("%Y-%m-%d")
 
 def get_user_profile(line_user_id):
     res = supabase.table("profiles").select(
-        "id, raw_profile_text, height_cm, weight_kg, age, gender, goal, target_calories, target_protein_g, last_restaurant, last_restaurant_at"
+        "id, raw_profile_text, height_cm, weight_kg, age, birth_year, gender, goal, target_calories, target_protein_g, last_restaurant, last_restaurant_at"
     ).eq("line_user_id", line_user_id).execute()
     return res.data[0] if res.data else None
 
@@ -1118,7 +1134,7 @@ def handle_postback(event):
         target_cal, target_protein = profile.get("target_calories"), profile.get("target_protein_g")
         raw_p_text = profile.get("raw_profile_text", "")
         if not target_cal or not target_protein:
-            target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
+            target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), get_effective_age(profile), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
 
         restaurant = rec.get("restaurant") or "外食"
         prev_items = [i.get("name", "") if isinstance(i, dict) else str(i) for i in (rec.get("items") or [])]
@@ -1192,7 +1208,9 @@ def handle_postback(event):
 
         payload = {
             "line_user_id": line_user_id, "raw_profile_text": full_profile_text, "height_cm": format_num(h),
-            "weight_kg": format_num(w), "age": format_num(a), "gender": g, "goal": db_goal,
+            "weight_kg": format_num(w), "age": format_num(a),
+            "birth_year": datetime.now(TAIWAN_TZ).year - int(a),  # 存出生年，年齡之後自動長大
+            "gender": g, "goal": db_goal,
             "target_calories": target_cal, "target_protein_g": target_protein, "updated_at": datetime.now(timezone.utc).isoformat()
         }
         supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
@@ -1225,7 +1243,7 @@ def handle_message(event):
     profile = get_user_profile(line_user_id)
 
     if user_msg in ["修改檔案", "重新建檔"]:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="【重新建立專屬健康檔案】\n\n第 1 步：\n\n請直接回覆您的【身高 / 體重】\n\n範例：170 / 60"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="【重新建立專屬健康檔案】\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：180 / 105"))
         return
 
     basic_profile = parse_basic_profile(user_msg, strict=bool(profile))
@@ -1256,7 +1274,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g, prefix=known))
             return
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="歡迎來到 BiteLogic！\n\n首次使用請先建立專屬檔案，共 3 個步驟，約 20 秒完成。\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：170 / 60"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="歡迎來到 BiteLogic！\n\n首次使用請先建立專屬檔案，共 3 個步驟，約 20 秒完成。\n\n第 1 步：請直接回覆您的【身高 / 體重】\n\n範例：180 / 105"))
             return
 
     try:
@@ -1265,7 +1283,7 @@ def handle_message(event):
         raw_p_text = profile.get("raw_profile_text", "")
 
         if not target_cal or not target_protein:
-            target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
+            target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), get_effective_age(profile), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
 
         # 個人檔案指令:顯示完整檔案卡片(含 BMR/TDEE 推導)
         if user_msg in ["個人檔案", "我的檔案", "查看檔案", "查看個人檔案"]:
