@@ -33,7 +33,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-SYSTEM_PROMPT = "你是 BiteLogic 外食 AI 顧問。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
+SYSTEM_PROMPT = "你是 BiteLogic 外食營養師。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
@@ -278,7 +278,36 @@ def get_today_summary(user_id):
         sum(int(m.get("protein_g") or 0) for m in meals),
     )
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None):
+def get_menu_context(user_msg, last_restaurant=None):
+    """查自建菜單庫 store_menus：若用戶訊息（或沿用的上次餐廳）命中某家店，
+    回傳 (店名, 權威菜單字串) 注入 prompt，讓 AI 只負責「組合」、不負責「記憶」。
+    表為空或查詢失敗時回 (None, None)，走原本純 AI 推薦路徑。"""
+    try:
+        res = supabase.table("store_menus").select("store_name, aliases, item_name, calories, protein_g, notes").eq("is_active", True).execute()
+        if not res.data:
+            return None, None
+
+        stores = {}
+        for r in res.data:
+            entry = stores.setdefault(r["store_name"], {"aliases": r.get("aliases") or "", "items": []})
+            entry["items"].append(r)
+
+        msg_l = user_msg.lower()
+        last_l = (last_restaurant or "").lower()
+        for store, info in stores.items():
+            names = [store] + [a.strip() for a in info["aliases"].split(",") if a.strip()]
+            if any(n.lower() and (n.lower() in msg_l or n.lower() == last_l) for n in names):
+                lines = []
+                for it in info["items"]:
+                    note = f"({it['notes']})" if it.get("notes") else ""
+                    lines.append(f"{it['item_name']}:{it['calories']}kcal/{it['protein_g']}g蛋白{note}")
+                return store, "；".join(lines)
+    except Exception:
+        # 表不存在或查詢失敗都不影響主流程
+        pass
+    return None, None
+
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
 
@@ -290,17 +319,28 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     meal_cal_cap = int(rem_cal / remaining_meals)
     meal_protein_cap = int(rem_protein / remaining_meals)
 
+    menu_store, menu_str = menu_context if menu_context else (None, None)
+    menu_section = ""
+    if menu_str:
+        menu_section = f"\n    【{menu_store} 官方菜單資料】(熱量/蛋白質以此為準，推薦品項只能從中選取，數字照抄不可自行估算):\n    {menu_str}\n"
+
+    avoid_section = ""
+    if avoid_items:
+        avoid_section = f"\n    用戶已拒絕的組合:{('、'.join(avoid_items))[:200]}。必須推薦與其明顯不同的新組合(至少更換主食方向)，不可只微調份量。\n"
+
     prompt = f"""
     {SYSTEM_PROMPT}
 
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
     用戶說:"{user_msg}"
-
+{menu_section}{avoid_section}
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 填 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
       硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
+      餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
+      丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
       若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
       填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
     C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
@@ -386,7 +426,7 @@ def build_flex_card(data, rec_id):
             ]
         },
         "footer": {
-            "type": "box", "layout": "vertical",
+            "type": "box", "layout": "vertical", "spacing": "sm",
             "contents": [
                 {
                     "type": "button", "style": "primary", "color": "#27AE60",
@@ -395,6 +435,15 @@ def build_flex_card(data, rec_id):
                         "label": f"一鍵紀錄這餐 ({total_cal} kcal)",
                         "data": f"action=log_meal&rec_id={rec_id}",
                         "displayText": f"我決定吃【{restaurant}】這套組合！"
+                    }
+                },
+                {
+                    "type": "button", "style": "secondary", "height": "sm",
+                    "action": {
+                        "type": "postback",
+                        "label": "不喜歡？換一組推薦",
+                        "data": f"action=reroll&rec_id={rec_id}",
+                        "displayText": f"換一組【{restaurant}】的推薦"
                     }
                 }
             ]
@@ -486,6 +535,42 @@ def handle_postback(event):
 
         summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
         line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
+
+    elif action == "reroll":
+        rec_id = data.get("rec_id", [""])[0]
+        rec = get_pending_recommendation(rec_id) if rec_id else None
+        profile = get_user_profile(line_user_id)
+
+        if not rec or not profile:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這張推薦卡片已過期，請重新輸入餐廳名稱取得新菜單。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
+            return
+
+        user_id = profile["id"]
+        target_cal, target_protein = profile.get("target_calories"), profile.get("target_protein_g")
+        raw_p_text = profile.get("raw_profile_text", "")
+        if not target_cal or not target_protein:
+            target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
+
+        restaurant = rec.get("restaurant") or "外食"
+        prev_items = [i.get("name", "") if isinstance(i, dict) else str(i) for i in (rec.get("items") or [])]
+        prev_items = [n for n in prev_items if n]
+
+        synthetic_msg = f"{restaurant}推薦"
+        menu_context = get_menu_context(synthetic_msg, restaurant)
+        today_meals = get_today_meals_list(user_id)
+        today_stats = (
+            sum(int(m.get("calories") or 0) for m in today_meals),
+            sum(int(m.get("protein_g") or 0) for m in today_meals),
+        )
+
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), synthetic_msg, last_restaurant=restaurant, today_meals=today_meals, menu_context=menu_context, avoid_items=prev_items)
+
+        if ai_res.get("type") == "recommendation":
+            new_rec_id = save_pending_recommendation(user_id, ai_res)
+            flex_content = build_flex_card(ai_res, new_rec_id)
+            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 新推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "重新推薦失敗，請再試一次。", quick_reply=get_quick_reply(user_id)))
 
     elif action == "step_goal":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
@@ -595,13 +680,14 @@ def handle_message(event):
             return
 
         last_restaurant = get_last_restaurant(profile)
+        menu_context = get_menu_context(user_msg, last_restaurant)
         today_meals = get_today_meals_list(user_id)
         today_stats = (
             sum(int(m.get("calories") or 0) for m in today_meals),
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
