@@ -864,8 +864,7 @@ def handle_postback(event):
         g, goal_text, act, meal = data.get("g", ["男"])[0], data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0], data.get("meal", ["一天三餐"])[0]
 
         db_goal = GOAL_MAP_TO_DB.get(goal_text, "fat_loss")
-        bmr, tdee, target_cal, target_protein = calculate_metabolic_profile(w, h, a, g, goal_text, act, meal)
-        pct = int(round(target_cal / tdee * 100)) if tdee else 0
+        target_cal, target_protein = calculate_precise_targets(w, h, a, g, goal_text, act, meal)
         full_profile_text = f"身高{format_num(h)}cm / 體重{format_num(w)}kg / {format_num(a)}歲 / {g} / {goal_text} / {act} / {meal}"
 
         payload = {
@@ -876,14 +875,14 @@ def handle_postback(event):
         supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
         new_profile = get_user_profile(line_user_id)
 
-        reply_text = (
-            f"【專屬健康檔案建檔成功】\n\n基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲\n"
-            f"目標模式：{goal_text}\n活動程度：{act}\n飲食習慣：{meal}\n\n"
-            f"代謝估算：\n• 基礎代謝率 BMR：約 {bmr} kcal\n• 每日總消耗 TDEE：約 {tdee} kcal\n\n"
-            f"您的每日精準控制目標：\n• 建議總熱量：約 {target_cal} kcal / 日（約 TDEE 的 {pct}%）\n• 建議蛋白質：約 {target_protein} g / 日\n\n"
-            f"提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳！"
-        )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None)))
+        welcome_text = "【專屬健康檔案建檔成功】\n\n提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳！"
+        if new_profile:
+            line_bot_api.reply_message(event.reply_token, [
+                TextSendMessage(text=welcome_text),
+                FlexSendMessage(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile), quick_reply=get_quick_reply(new_profile["id"]))
+            ])
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=welcome_text, quick_reply=get_quick_reply(None)))
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
