@@ -50,8 +50,9 @@ class LogResult(BaseModel):
     type: Literal["log"]
     restaurant: Optional[str] = Field(default=None, description="連鎖店名，非連鎖填 null")
     food_name: str
-    calories: int
-    protein_g: int
+    calories: float
+    protein_g: float
+    is_correction: Optional[bool] = Field(default=None, description="用戶在更正上一筆紀錄的數值時為 true，此時 calories/protein_g 填更正後的完整正確值(不是差額)")
 
 class RecommendationResult(BaseModel):
     """用戶想知道某餐廳怎麼點 → 產生口袋菜單。items 為菜單本體，必須列出 1~5 個具體單品。"""
@@ -471,6 +472,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
 {menu_section}{avoid_section}{store_section}
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
+      若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
@@ -673,8 +675,29 @@ def delete_last_meal(user_id):
     supabase.table("meal_items").delete().eq("id", last_meal["id"]).execute()
     return f"已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
 
+def update_last_meal(user_id, intent_data):
+    """更正今日最後一筆紀錄的數值。回傳更正後的資料,無可更正時回 None。"""
+    meals = get_today_meals_list(user_id)
+    if not meals:
+        return None
+    last = meals[-1]
+    upd = {}
+    if intent_data.get("calories") is not None:
+        upd["calories"] = int(round(float(intent_data["calories"])))
+    if intent_data.get("protein_g") is not None:
+        upd["protein_g"] = int(round(float(intent_data["protein_g"])))
+    if not upd:
+        return None
+    supabase.table("meal_items").update(upd).eq("id", last["id"]).execute()
+    return {
+        "food_name": last["food_name"],
+        "calories": upd.get("calories", last["calories"]),
+        "protein_g": upd.get("protein_g", last["protein_g"]),
+    }
+
 def log_meal_to_supabase(user_id, intent_data):
-    cals, protein = int(intent_data.get("calories") or 0), int(intent_data.get("protein_g") or 0)
+    cals = int(round(float(intent_data.get("calories") or 0)))
+    protein = int(round(float(intent_data.get("protein_g") or 0)))
     restaurant, food_name_raw = intent_data.get("restaurant"), intent_data.get("food_name") or "未知餐點"
     full_food_name = f"【{restaurant}】{food_name_raw}" if (restaurant and restaurant != "null") else food_name_raw
 
@@ -909,8 +932,11 @@ def handle_message(event):
             if candidate and not any(w in candidate for w in ["什麼", "其他", "別的", "怎麼", "如何"]):
                 explicit_store = candidate
 
-        # 「我吃了X」「剛吃了X」等回報語氣 = 飲食紀錄意圖,不可被判成推薦
-        expected_log = bool(re.match(r'^\s*(我|本人)?\s*(今天|早上|中午|晚上|早餐|午餐|晚餐|宵夜)?\s*(剛剛?|已經)?\s*(吃|喝)了', user_msg))
+        # 「我吃了X」等回報語氣、以及「記少了/其實是X大卡」等更正語氣 = 紀錄類意圖,不可被判成推薦
+        expected_log = bool(
+            re.match(r'^\s*(我|本人)?\s*(今天|早上|中午|晚上|早餐|午餐|晚餐|宵夜)?\s*(剛剛?|已經)?\s*(吃|喝)了', user_msg)
+            or re.search(r'(記少|記多|記錯|寫錯|算錯|更正|修正|其實(是|有|才)|應該是\s*\d)', user_msg)
+        )
 
         menu_context = get_menu_context(user_msg, last_restaurant)
         today_meals = get_today_meals_list(user_id)
@@ -923,8 +949,19 @@ def handle_message(event):
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
-            food, cal, protein, total_cal, total_protein = log_meal_to_supabase(user_id, ai_res)
-            summary_flex = build_summary_flex_card(total_cal, target_cal, total_protein, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
+            if ai_res.get("is_correction"):
+                corrected = update_last_meal(user_id, ai_res)
+                if corrected:
+                    total_cal_now, total_protein_now = get_today_summary(user_id)
+                    summary_flex = build_summary_flex_card(total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"))
+                    line_bot_api.reply_message(event.reply_token, [
+                        TextSendMessage(text=f"已更正上一筆紀錄:\n{corrected['food_name']} → {corrected['calories']} kcal / {corrected['protein_g']} g 蛋白質"),
+                        FlexSendMessage(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+                    ])
+                    return
+                # 今日無紀錄可更正 -> 往下當成新紀錄寫入
+            food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
+            summary_flex = build_summary_flex_card(total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
