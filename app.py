@@ -58,9 +58,8 @@ class RecommendationResult(BaseModel):
     type: Literal["recommendation"]
     restaurant: str
     title: str = Field(description="10字內主題")
-    budget: str = Field(description="如：單餐目標600kcal")
     items: List[RecItem] = Field(min_length=1, max_length=5, description="進店直接點的具體品項清單，絕不可為空")
-    warning: str = Field(description="避坑提示")
+    warning: str = Field(description="避坑提示；若蛋白質未達標，須在此建議補充方式")
     total_cal: int
     total_protein: int
 
@@ -300,8 +299,10 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
 
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 填 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g。
-    B.餐廳推薦/調整(type=recommendation): 設計約{meal_cal_cap}kcal/{meal_protein_cap}g蛋白質組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
-      填 restaurant、title(10字內主題)、budget(如"單餐目標{meal_cal_cap}kcal")、items(每項含name/cal/protein)、warning(避坑提示)、total_cal、total_protein。
+    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
+      硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
+      若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
+      填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
     C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
     """
     def _call(extra_note=""):
@@ -332,6 +333,10 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
             if result["type"] == "recommendation" and not result.get("items"):
                 return {"type": "chat", "reply_text": f"這家店的菜單資訊暫時生成失敗，請再傳一次「{user_msg}」試試。"}
 
+        # budget 字串由代碼決定性生成（含蛋白質目標），不交給 AI 自由發揮
+        if result["type"] == "recommendation":
+            result["budget"] = f"單餐目標：{meal_cal_cap} kcal ｜ 蛋白質 {meal_protein_cap} g"
+
         return result
 
     except Exception:
@@ -348,6 +353,8 @@ def build_flex_card(data, rec_id):
     items = data.get("items") or []
     warning = data.get("warning") or "注意適量攝取"
     total_cal = data.get("total_cal") or 500
+    total_protein = data.get("total_protein") or 0
+    combo_summary = f"本組合合計：{total_cal} kcal ｜ 蛋白質 {total_protein} g"
 
     items_contents = []
     for item in items:
@@ -373,6 +380,7 @@ def build_flex_card(data, rec_id):
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": "進店直接點：", "weight": "bold", "size": "sm", "margin": "md"},
                 *items_contents,
+                {"type": "text", "text": combo_summary, "weight": "bold", "size": "sm", "color": "#1F2937", "margin": "md"},
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": f"地雷與補充提醒：{warning}", "size": "xs", "color": "#E74C3C", "margin": "md", "wrap": True}
             ]
