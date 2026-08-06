@@ -72,6 +72,26 @@ AIResultAdapter = TypeAdapter(
     Annotated[Union[LogResult, RecommendationResult, ChatResult], Field(discriminator="type")]
 )
 
+def normalize_ai_result(d):
+    """容錯層：模型偶爾會搞混欄位名(如 log 意圖誤用 total_cal/total_protein)。
+    在 schema 驗證前把常見的別名搬回正名，減少不必要的失敗。"""
+    if not isinstance(d, dict):
+        return d
+    t = d.get("type")
+    if t == "log":
+        if "calories" not in d and "total_cal" in d: d["calories"] = d.pop("total_cal")
+        if "protein_g" not in d and "total_protein" in d: d["protein_g"] = d.pop("total_protein")
+        if "protein_g" not in d and "protein" in d: d["protein_g"] = d.pop("protein")
+        if not d.get("food_name"):
+            for alias in ("title", "name", "food", "item"):
+                if d.get(alias):
+                    d["food_name"] = d.pop(alias)
+                    break
+    elif t == "recommendation":
+        if "total_cal" not in d and "calories" in d: d["total_cal"] = d.pop("calories")
+        if "total_protein" not in d and "protein_g" in d: d["total_protein"] = d.pop("protein_g")
+    return d
+
 # ================================================================================
 
 def format_num(val):
@@ -295,6 +315,62 @@ def get_today_summary(user_id):
         sum(int(m.get("protein_g") or 0) for m in meals),
     )
 
+def log_weight(user_id, weight, profile):
+    """記錄今日體重(同日覆蓋),同步更新 profile 體重並重算每日目標。
+    回傳確認訊息文字。"""
+    today = get_today_str()
+
+    # 前一筆(今天以前)用於顯示變化
+    prev_res = supabase.table("weight_logs").select("weight_kg, log_date").eq("user_id", user_id).lt("log_date", today).order("log_date", desc=True).limit(1).execute()
+    prev = prev_res.data[0] if prev_res.data else None
+
+    supabase.table("weight_logs").upsert(
+        {"user_id": user_id, "log_date": today, "weight_kg": weight},
+        on_conflict="user_id,log_date"
+    ).execute()
+
+    # 同步 profile 體重、重算目標(蛋白質目標依體重浮動,不同步會漂移)
+    raw_p_text = profile.get("raw_profile_text") or ""
+    new_raw = re.sub(r'體重\d+(?:\.\d+)?kg', f'體重{format_num(weight)}kg', raw_p_text) if '體重' in raw_p_text else raw_p_text
+    new_target_cal, new_target_protein = calculate_precise_targets(
+        weight, profile.get("height_cm"), profile.get("age", 30), profile.get("gender"),
+        profile.get("goal"), raw_p_text, raw_p_text
+    )
+    supabase.table("profiles").update({
+        "weight_kg": weight, "raw_profile_text": new_raw,
+        "target_calories": new_target_cal, "target_protein_g": new_target_protein,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }).eq("id", user_id).execute()
+
+    lines = [f"已記錄今日體重:{format_num(weight)} kg"]
+    if prev:
+        diff = round(float(weight) - float(prev["weight_kg"]), 1)
+        arrow = "↓" if diff < 0 else ("↑" if diff > 0 else "→")
+        lines.append(f"與上次({prev['log_date']})相比:{arrow} {abs(diff)} kg")
+    lines.append(f"每日目標已同步更新:{new_target_cal} kcal / 蛋白質 {new_target_protein} g")
+    lines.append("\n提示:輸入「體重紀錄」可查看近期趨勢。")
+    return "\n".join(lines)
+
+def get_weight_history_text(user_id, limit=8):
+    res = supabase.table("weight_logs").select("log_date, weight_kg").eq("user_id", user_id).order("log_date", desc=True).limit(limit).execute()
+    if not res.data:
+        return "尚無體重紀錄。輸入「體重 104.5」即可記錄第一筆。"
+    rows = list(reversed(res.data))
+    lines = ["近期體重紀錄:"]
+    prev_w = None
+    for r in rows:
+        w = float(r["weight_kg"])
+        mark = ""
+        if prev_w is not None:
+            d = round(w - prev_w, 1)
+            mark = f"({'↓' if d < 0 else '↑'}{abs(d)})" if d != 0 else "(→)"
+        lines.append(f"{r['log_date']}:{format_num(w)} kg {mark}")
+        prev_w = w
+    total = round(float(rows[-1]["weight_kg"]) - float(rows[0]["weight_kg"]), 1)
+    if len(rows) >= 2 and total != 0:
+        lines.append(f"\n區間變化:{'↓' if total < 0 else '↑'} {abs(total)} kg")
+    return "\n".join(lines)
+
 def get_menu_context(user_msg, last_restaurant=None):
     """查自建菜單庫 store_menus：若用戶訊息（或沿用的上次餐廳）命中某家店，
     回傳 (店名, 權威菜單字串) 注入 prompt，讓 AI 只負責「組合」、不負責「記憶」。
@@ -324,9 +400,13 @@ def get_menu_context(user_msg, last_restaurant=None):
         pass
     return None, None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
+
+    # 用戶明確指定店家時，上次餐廳不可干擾判斷
+    if explicit_store:
+        last_restaurant = None
 
     rem_cal, rem_protein = max(0, target_cal - cal), max(0, target_protein - protein)
     logged_count = len(today_meals) if today_meals else 0
@@ -345,16 +425,20 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     if avoid_items:
         avoid_section = f"\n    用戶已拒絕的組合:{('、'.join(avoid_items))[:200]}。必須推薦與其明顯不同的新組合(至少更換主食方向)，不可只微調份量。\n"
 
+    store_section = ""
+    if explicit_store:
+        store_section = f"\n    【用戶明確指定餐廳:{explicit_store}】restaurant 欄位與所有品項必須屬於此店，嚴禁使用任何其他店家。\n"
+
     prompt = f"""
     {SYSTEM_PROMPT}
 
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
     用戶說:"{user_msg}"
-{menu_section}{avoid_section}
+{menu_section}{avoid_section}{store_section}
     判斷意圖，依 schema 輸出對應欄位:
-    A.飲食紀錄(type=log): 填 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g。
-    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。若為調整語氣且上次餐廳存在，優先沿用{last_restaurant}。
+    A.飲食紀錄(type=log): 欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
+    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
@@ -396,15 +480,41 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         if not res_text:
             return {"type": "chat", "reply_text": "AI 暫時無法回應，請重試。"}
 
-        result = AIResultAdapter.validate_python(json.loads(res_text)).model_dump()
+        def _parse(txt):
+            data = json.loads(txt)
+            try:
+                return AIResultAdapter.validate_python(data).model_dump()
+            except Exception:
+                # 欄位名容錯(如 log 誤用 total_cal)後再驗一次
+                return AIResultAdapter.validate_python(normalize_ai_result(data)).model_dump()
 
-        # 防線：若判為推薦但菜單仍為空，帶著糾正指令重試一次
+        # 防線1：schema 驗證失敗 -> 帶欄位名糾正指令重試一次
+        try:
+            result = _parse(res_text)
+        except Exception:
+            print("⚠️ schema 驗證失敗，帶糾正指令重試一次")
+            res_text = _call("\n注意：必須嚴格使用 schema 欄位名。type=log 用 food_name/calories/protein_g；type=recommendation 用 items/total_cal/total_protein；type=chat 用 reply_text。")
+            result = _parse(res_text)
+
+        # 防線2：若判為推薦但菜單仍為空，帶著糾正指令重試一次
         if result["type"] == "recommendation" and not result.get("items"):
             print("⚠️ recommendation 缺 items，重試一次")
             res_text = _call("\n注意：items 是菜單本體，必須列出 1~5 個具體單品（含名稱/熱量/蛋白質），不可為空。")
-            result = AIResultAdapter.validate_python(json.loads(res_text)).model_dump()
+            result = _parse(res_text)
             if result["type"] == "recommendation" and not result.get("items"):
                 return {"type": "chat", "reply_text": f"這家店的菜單資訊暫時生成失敗，請再傳一次「{user_msg}」試試。"}
+
+        # 防線3：用戶明確指定店家，但模型推薦了別家 -> 糾正重試一次
+        if explicit_store and result["type"] == "recommendation":
+            rec_store = (result.get("restaurant") or "").lower()
+            es = explicit_store.lower()
+            if es not in rec_store and rec_store not in es:
+                print(f"⚠️ 指定 {explicit_store} 但推薦了 {result.get('restaurant')}，糾正重試")
+                res_text = _call(f"\n嚴重錯誤糾正：用戶指定的是【{explicit_store}】，你剛推薦了別家。restaurant 與所有品項必須改為 {explicit_store} 的。")
+                result = _parse(res_text)
+                rec_store = (result.get("restaurant") or "").lower() if result["type"] == "recommendation" else ""
+                if result["type"] == "recommendation" and es not in rec_store and rec_store not in es:
+                    return {"type": "chat", "reply_text": f"抱歉，剛剛推薦錯店了。請再傳一次「{explicit_store}推薦」。"}
 
         # budget 字串由代碼決定性生成（含蛋白質目標），不交給 AI 自由發揮
         if result["type"] == "recommendation":
@@ -609,7 +719,7 @@ def handle_postback(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), synthetic_msg, last_restaurant=restaurant, today_meals=today_meals, menu_context=menu_context, avoid_items=prev_items)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), synthetic_msg, last_restaurant=restaurant, today_meals=today_meals, menu_context=menu_context, avoid_items=prev_items, explicit_store=restaurant)
 
         if ai_res.get("type") == "recommendation":
             new_rec_id = save_pending_recommendation(user_id, ai_res)
@@ -698,6 +808,22 @@ def handle_message(event):
         if not target_cal or not target_protein:
             target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
 
+        # 體重指令:查詢趨勢
+        if user_msg in ["體重紀錄", "體重記錄", "體重趨勢"]:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=get_weight_history_text(user_id), quick_reply=get_quick_reply(user_id)))
+            return
+
+        # 體重指令:記錄(限定「體重 104.5」這類完整格式,避免誤吞一般對話)
+        w_match = re.match(r'^體重\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:kg|公斤)?$', user_msg, re.IGNORECASE)
+        if w_match:
+            w_val = float(w_match.group(1))
+            if 20 <= w_val <= 300:
+                reply_text = log_weight(user_id, w_val, profile)
+            else:
+                reply_text = "這個體重數字看起來不太對,請確認後再輸入一次(範例:體重 104.5)。"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id)))
+            return
+
         if any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
             meals = get_today_meals_list(user_id)
             if not meals:
@@ -726,6 +852,15 @@ def handle_message(event):
             return
 
         last_restaurant = get_last_restaurant(profile)
+
+        # 「X推薦」格式 = 用戶明確指定店家(如 Quick Reply 按鈕),推薦必須鎖定該店
+        explicit_store = None
+        es_match = re.match(r'^(.{1,15}?)(?:的)?推薦$', user_msg)
+        if es_match:
+            candidate = es_match.group(1).strip()
+            if candidate and not any(w in candidate for w in ["什麼", "其他", "別的", "怎麼", "如何"]):
+                explicit_store = candidate
+
         menu_context = get_menu_context(user_msg, last_restaurant)
         today_meals = get_today_meals_list(user_id)
         today_stats = (
@@ -733,7 +868,7 @@ def handle_message(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
