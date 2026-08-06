@@ -445,6 +445,56 @@ def get_weight_history_text(user_id, limit=8):
 VAGUE_FOOD_WORDS = ["飲食紀錄", "餐點", "未知", "一餐", "套餐組合", "外食", "正餐"]
 MEAL_WORDS = ["便當", "早餐", "午餐", "晚餐", "宵夜", "點心", "自助餐", "小吃", "火鍋", "麵", "飯"]
 
+CORRECTION_PHRASES = r'(記少|記多|記錯|寫錯|算錯|更正|修正|其實(是|有|才)|應該是|沒有|不是|改成|少算|多算)'
+
+def has_correction_intent(user_msg):
+    """用戶是否明確在修正上一筆(而非又吃了別的東西)。"""
+    return bool(re.search(CORRECTION_PHRASES, user_msg))
+
+def _norm_food(s):
+    s = re.sub(r'^【.*?】', '', s or '')
+    return re.sub(r'[\s()（）]', '', s)
+
+def restates_last_meal(ai_res, last_meal):
+    """AI 把上一筆的品項整串重述進來了(常見於誤把新東西併入舊紀錄)。"""
+    if not last_meal:
+        return False
+    mins = last_meal.get("minutes_ago")
+    if mins is not None and mins > 240:
+        return False
+    old, new = _norm_food(last_meal.get("food_name")), _norm_food(ai_res.get("food_name"))
+    if not old or not new:
+        return False
+    if old == new:
+        return True
+    old_items = [p for p in re.split(r'[、,，/]', old) if p]
+    if not old_items:
+        return False
+    return sum(1 for it in old_items if it in new) == len(old_items)
+
+def extract_delta_entry(ai_res, last_meal):
+    """AI 誤把新吃的東西併進上一筆時，抽出「只有這次新增的部分」作為獨立紀錄。
+    失敗(算不出正的增量)時回 None，交由上層決定。"""
+    old, new = _norm_food(last_meal.get("food_name")), _norm_food(ai_res.get("food_name"))
+    old_items = [p for p in re.split(r'[、,，/]', old) if p]
+    new_items = [p for p in re.split(r'[、,，/]', new) if p]
+    delta_items = [it for it in new_items if not any(it in o or o in it for o in old_items)]
+
+    try:
+        d_cal = int(round(float(ai_res.get("calories") or 0))) - int(last_meal.get("calories") or 0)
+        d_pro = int(round(float(ai_res.get("protein_g") or 0))) - int(last_meal.get("protein_g") or 0)
+    except Exception:
+        return None
+
+    if not delta_items or d_cal <= 0:
+        return None
+    return {
+        "restaurant": ai_res.get("restaurant"),
+        "food_name": "、".join(delta_items),
+        "calories": d_cal,
+        "protein_g": max(0, d_pro),
+    }
+
 def is_vague_log(ai_res):
     """判斷這筆紀錄是否資訊不足(只有店名/含糊描述)。AI 未主動標記時的代碼防線。"""
     if ai_res.get("needs_detail"):
@@ -549,7 +599,7 @@ def get_menu_context(user_msg, last_restaurant=None):
         pass
     return None, None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None, expected_log=False, last_meal=None):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None, expected_log=False, last_meal=None, expected_rec=False):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
 
@@ -579,6 +629,8 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         store_section = f"\n    【用戶明確指定餐廳:{explicit_store}】restaurant 欄位與所有品項必須屬於此店，嚴禁使用任何其他店家。\n"
     if expected_log:
         store_section += "\n    【此訊息是飲食紀錄回報】用戶在告知已經吃了什麼，必須輸出 type=log，絕不可輸出推薦。\n"
+    if expected_rec:
+        store_section += "\n    【此訊息是求推薦】用戶說的是「想吃/要吃」，表示還沒吃，必須輸出 type=recommendation，絕不可輸出 log。\n"
 
     last_meal_section = ""
     if last_meal:
@@ -587,9 +639,11 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         last_meal_section = (
             f"\n    【最近一筆紀錄】{when}已記錄:{last_meal['food_name']} "
             f"({last_meal['calories']}kcal/{last_meal['protein_g']}g蛋白)。\n"
-            f"    若用戶這則訊息是在補充、修正或重述「這同一餐」的內容(例如補上配菜、更換其中某個品項、把整餐重講一次)，"
-            f"必須輸出 type=log 且 is_correction=true，food_name 寫這餐的完整內容、calories/protein_g 寫整餐更正後的總量(不是新增的部分)。"
-            f"只有在確定是另外吃的一餐時才輸出 is_correction=false。\n"
+            f"    (a)若用戶明確在「修正」這一筆(如「沒有滷雞腿」「其實是228大卡」「記少了」「不是雞腿是雞胸」)，"
+            f"輸出 is_correction=true，food_name 寫更正後的完整內容、calories/protein_g 寫整餐更正後的總量。\n"
+            f"    (b)若用戶是在回報「又吃了別的東西」(如「吃了兩個甜甜圈」「又喝了一杯豆漿」)，這是**新的一筆**:"
+            f"is_correction=false，food_name 只寫這次新吃的東西，calories/protein_g 只算這次新吃的量。"
+            f"絕對不可把上一筆的品項重複寫進來，那會導致重複計算。\n"
         )
 
     prompt = f"""
@@ -603,7 +657,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
       嚴禁編造:若用戶只說了店名或含糊帶過(如「我吃麥當勞」「吃了便當」「午餐吃自助餐」)、沒有講出具體品項或份量，同一家店的熱量可能相差三倍以上，此時必須設 needs_detail=true(calories/protein_g 填 0 即可)，不可自行假設一個平均值。只有用戶講出具體品項(如「大麥克加中薯」)時才給數字。
       若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
-    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
+    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。訊息只有店名或食物類別、沒有「吃了」這類完成語氣時(如「自助餐」「麥當勞」「想吃火鍋」)，一律視為求推薦。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則(份量最優先): 用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal，因此**這一餐必須吃到 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal**。給出明顯低於此區間的組合是嚴重錯誤(會害用戶下一餐被迫暴食)，寧可份量加大、加點主食或加倍肉量，也不可湊出一份 400~600 kcal 的輕食。total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
@@ -693,6 +747,12 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
                 rec_store = (result.get("restaurant") or "").lower() if result["type"] == "recommendation" else ""
                 if result["type"] == "recommendation" and es not in rec_store and rec_store not in es:
                     return {"type": "chat", "reply_text": f"抱歉，剛剛推薦錯店了。請再傳一次「{explicit_store}推薦」。"}
+
+        # 防線6：明確的求推薦語氣卻回了紀錄 -> 糾正重試一次
+        if expected_rec and result["type"] == "log":
+            print("⚠️ 求推薦語氣卻回紀錄，糾正重試")
+            res_text = _call("\n糾正：用戶說的是「想吃/要吃」，代表還沒吃，必須輸出 type=recommendation 給出這家店的點餐組合，不是 log。")
+            result = _parse(res_text)
 
         # 防線5：份量檢查。prompt 的區間規則只是建議，模型常給出遠低於單餐目標的組合
         # （如兩餐制卻只推 464/1030 kcal，等於逼用戶下一餐吃 1600）。此處由代碼驗證並要求補足。
@@ -1146,6 +1206,12 @@ def handle_message(event):
             re.match(r'^\s*(我|本人)?\s*(今天|早上|中午|晚上|早餐|午餐|晚餐|宵夜)?\s*(剛剛?|已經)?\s*(吃|喝)了', user_msg)
             or re.search(r'(記少|記多|記錯|寫錯|算錯|更正|修正|其實(是|有|才)|應該是\s*\d)', user_msg)
         )
+        # 「我想吃X」「等等要吃X」= 尚未進食,明確為求推薦,不可被判成紀錄
+        expected_rec = not expected_log and (
+            forced_intent == "recommendation" or bool(
+                re.match(r'^\s*(我|本人)?\s*(現在|等等|待會|等一下|晚點|今天|中午|晚上|早上)?\s*(想|要|準備|打算)(去)?(吃|喝)', user_msg)
+            )
+        )
         # 用戶按了「給我推薦」-> 明確告知尚未進食，避免被判成紀錄
         ai_msg = f"{user_msg}（還沒吃，請推薦這家店該怎麼點）" if forced_intent == "recommendation" else user_msg
 
@@ -1157,14 +1223,39 @@ def handle_message(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), ai_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log, last_meal=last_meal)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), ai_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log, last_meal=last_meal, expected_rec=expected_rec)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
-            # 資訊不足(只講店名)時不編造數字，改為詢問具體品項
+            # AI 把上一筆的品項整串重述進來時，依用戶語氣分流:
+            if restates_last_meal(ai_res, last_meal):
+                if has_correction_intent(user_msg):
+                    ai_res["is_correction"] = True   # 真的在修正這一筆
+                else:
+                    # 用戶只是又吃了別的東西，AI 誤併 -> 拆出增量當新的一筆
+                    delta = extract_delta_entry(ai_res, last_meal)
+                    if delta:
+                        print(f"⚠️ AI 誤併入上一筆，拆出增量:{delta['food_name']} {delta['calories']}kcal")
+                        ai_res.update(delta)
+                        ai_res["is_correction"] = False
+
+            # 資訊不足(只講店名)時不編造數字
             if not ai_res.get("is_correction") and is_vague_log(ai_res):
-                line_bot_api.reply_message(event.reply_token, build_ask_detail_reply(ai_res, user_id))
-                return
+                # 訊息從未提到「吃/喝」-> 用戶只是報了店名(如「自助餐」)，應該給推薦而不是追問吃了什麼
+                if not re.search(r'[吃喝]', user_msg):
+                    print(f"⚠️ 純店名被判為紀錄，改判求推薦:{user_msg}")
+                    ai_res = process_ai_in_single_call(
+                        raw_p_text, today_stats, (target_cal, target_protein), user_msg,
+                        last_restaurant=None, today_meals=today_meals, menu_context=menu_context,
+                        explicit_store=explicit_store or (ai_res.get("restaurant") or None),
+                        expected_rec=True, last_meal=None
+                    )
+                    msg_type = ai_res.get("type")
+                else:
+                    line_bot_api.reply_message(event.reply_token, build_ask_detail_reply(ai_res, user_id))
+                    return
+
+        if msg_type == "log":
 
             if ai_res.get("is_correction"):
                 corrected = update_last_meal(user_id, ai_res)
