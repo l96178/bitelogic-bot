@@ -451,7 +451,13 @@ def build_flex_card(data, rec_id):
     }
 
 def save_pending_recommendation(user_id, ai_res):
-    """推薦內容落地，回傳 rec_id 供 postback 使用。"""
+    """推薦內容落地，回傳 rec_id 供 postback 使用。
+    順手清掉 3 天前的舊資料（懶清理）：不依賴 pg_cron，表的大小自然收斂在最近 3 天的推薦量。"""
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        supabase.table("pending_recommendations").delete().lt("created_at", cutoff).execute()
+    except Exception:
+        pass  # 清理失敗不影響主流程
     res = supabase.table("pending_recommendations").insert({
         "user_id": user_id,
         "payload": json.dumps(ai_res, ensure_ascii=False)
@@ -531,6 +537,13 @@ def handle_postback(event):
             "protein_g": rec.get("total_protein") or 0
         }
         food, c, p, total_c, total_p = log_meal_to_supabase(profile["id"], intent_data)
+
+        # 用後即刪：同一張卡片再按一次會走「已過期」路徑，防止手滑重複記錄同一餐
+        try:
+            supabase.table("pending_recommendations").delete().eq("id", rec_id).execute()
+        except Exception:
+            pass
+
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
 
         summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
