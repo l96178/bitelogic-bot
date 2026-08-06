@@ -158,13 +158,16 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
 
-def _kv_row(label, value):
-    """卡片內的「標籤:值」橫列。"""
+def _kv_row(label, value, sub=None):
+    """卡片內的「標籤:值」橫列。sub 為值下方的小字補充(避免長字串在右欄折行)。"""
+    right = [{"type": "text", "text": str(value), "size": "sm", "weight": "bold", "color": "#1F2937", "align": "end", "wrap": True}]
+    if sub:
+        right.append({"type": "text", "text": str(sub), "size": "xxs", "color": "#9CA3AF", "align": "end", "wrap": True})
     return {
         "type": "box", "layout": "horizontal",
         "contents": [
-            {"type": "text", "text": label, "size": "sm", "color": "#6B7280", "flex": 3},
-            {"type": "text", "text": str(value), "size": "sm", "weight": "bold", "color": "#1F2937", "align": "end", "flex": 5, "wrap": True}
+            {"type": "text", "text": label, "size": "sm", "color": "#6B7280", "flex": 4, "gravity": "top"},
+            {"type": "box", "layout": "vertical", "flex": 5, "contents": right}
         ]
     }
 
@@ -206,10 +209,10 @@ def build_profile_flex_card(profile):
                 {"type": "separator", "margin": "md"},
                 _section_caption("代謝估算"),
                 _kv_row("基礎代謝率 BMR", f"約 {bmr} kcal"),
-                _kv_row("每日總消耗 TDEE", f"約 {tdee} kcal"),
+                _kv_row("總消耗 TDEE", f"約 {tdee} kcal"),
                 {"type": "separator", "margin": "md"},
                 _section_caption("每日控制目標"),
-                _kv_row("總熱量", f"{tc} kcal（TDEE 的 {pct}%）"),
+                _kv_row("總熱量", f"{tc} kcal", sub=f"TDEE 的 {pct}%"),
                 _kv_row("蛋白質", f"{tp} g"),
                 {"type": "separator", "margin": "md"},
                 {"type": "text", "text": "提示：輸入「修改檔案」可重新建檔；輸入「體重 104.5」可更新體重並同步目標。", "size": "xs", "color": "#6B7280", "wrap": True, "margin": "md"}
