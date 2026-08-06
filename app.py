@@ -910,6 +910,17 @@ def handle_postback(event):
         supabase.table("profiles").upsert(payload, on_conflict="line_user_id").execute()
         new_profile = get_user_profile(line_user_id)
 
+        # 建檔體重即為減脂起點，同步寫入 weight_logs（同日重複建檔以最新值覆蓋）
+        if new_profile:
+            try:
+                supabase.table("weight_logs").upsert(
+                    {"user_id": new_profile["id"], "log_date": get_today_str(), "weight_kg": format_num(w)},
+                    on_conflict="user_id,log_date"
+                ).execute()
+            except Exception:
+                print("⚠️ 建檔體重寫入 weight_logs 失敗：")
+                print(traceback.format_exc())
+
         welcome_text = "【專屬健康檔案建檔成功】\n\n提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳！"
         if new_profile:
             line_bot_api.reply_message(event.reply_token, [
