@@ -236,43 +236,62 @@ def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF
         ]
     }
 
-def build_meals_detail_flex_card(meals, cals, protein, target_cal, target_protein):
-    """今日飲食明細卡片:逐筆清單 + 總計進度條。"""
-    item_rows = []
-    for idx, m in enumerate(meals, 1):
-        item_rows.append({
-            "type": "box", "layout": "vertical", "margin": "sm",
-            "contents": [
-                {"type": "text", "text": f"{idx}. {m['food_name']}", "size": "sm", "color": "#1F2937", "wrap": True},
-                {"type": "text", "text": f"+{m['calories']} kcal ｜ +{m['protein_g']} g 蛋白質", "size": "xs", "color": "#9CA3AF", "margin": "xs"}
-            ]
-        })
+def build_today_card(meals, cals, protein, target_cal, target_protein, goal, last_logged_info=None, info_label="成功寫入飲食紀錄"):
+    """統一的「今日」卡片:今日進度查詢、飲食明細、紀錄成功、更正、刪除後全部共用。
+    含逐筆清單 + 進度條;last_logged_info 存在時頂部顯示綠色成功框。"""
+    goal_disp = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
+    header_title = "紀錄成功與今日進度" if last_logged_info else "今日進度總覽"
+
+    body_contents = []
+
+    if last_logged_info:
+        body_contents.extend([
+            {
+                "type": "box", "layout": "vertical", "backgroundColor": "#ECFDF5", "cornerRadius": "md", "paddingAll": "md",
+                "contents": [
+                    {"type": "text", "text": info_label, "size": "xs", "color": "#059669", "weight": "bold"},
+                    {"type": "text", "text": f"{last_logged_info.get('food', '')}", "size": "sm", "weight": "bold", "color": "#065F46", "margin": "xs", "wrap": True},
+                    {"type": "text", "text": f"{last_logged_info.get('cal', 0)} kcal ｜ {last_logged_info.get('protein', 0)} g 蛋白質", "size": "xs", "color": "#047857", "margin": "xs"}
+                ]
+            },
+            {"type": "separator", "margin": "md"}
+        ])
+
+    if meals:
+        for idx, m in enumerate(meals, 1):
+            body_contents.append({
+                "type": "box", "layout": "vertical", "margin": "sm",
+                "contents": [
+                    {"type": "text", "text": f"{idx}. {m['food_name']}", "size": "sm", "color": "#1F2937", "wrap": True},
+                    {"type": "text", "text": f"+{m['calories']} kcal ｜ +{m['protein_g']} g 蛋白質", "size": "xs", "color": "#9CA3AF", "margin": "xs"}
+                ]
+            })
+    else:
+        body_contents.append({"type": "text", "text": "今天尚無任何飲食紀錄。", "size": "sm", "color": "#6B7280", "margin": "sm"})
 
     rem_cal = max(0, target_cal - cals)
     rem_protein = max(0, target_protein - protein)
     footer_line = f"剩餘額度：{rem_cal} kcal ｜ 蛋白質還差：{rem_protein} g" if cals <= target_cal else f"已超出上限 {cals - target_cal} kcal ｜ 蛋白質還差：{rem_protein} g"
+
+    body_contents.extend([
+        {"type": "separator", "margin": "lg"},
+        _progress_bar_block("熱量攝取", cals, target_cal, "kcal", "#27AE60"),
+        _progress_bar_block("蛋白質攝取", protein, target_protein, "g", "#3B82F6"),
+        {"type": "text", "text": footer_line, "size": "xs", "color": "#6B7280", "margin": "md", "wrap": True},
+        {"type": "separator", "margin": "md"},
+        {"type": "text", "text": "提示：輸入「刪除上一筆」可撤銷、「你記少了,是X大卡」可更正最近一筆。", "size": "xs", "color": "#6B7280", "wrap": True}
+    ])
 
     return {
         "type": "bubble", "size": "mega",
         "header": {
             "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
             "contents": [
-                {"type": "text", "text": "今日飲食明細", "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"{get_today_str()} ｜ 共 {len(meals)} 筆", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+                {"type": "text", "text": header_title, "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": f"{get_today_str()} ｜ {goal_disp} ｜ 共 {len(meals)} 筆", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
             ]
         },
-        "body": {
-            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg",
-            "contents": [
-                *item_rows,
-                {"type": "separator", "margin": "lg"},
-                _progress_bar_block("熱量攝取", cals, target_cal, "kcal", "#27AE60"),
-                _progress_bar_block("蛋白質攝取", protein, target_protein, "g", "#3B82F6"),
-                {"type": "text", "text": footer_line, "size": "xs", "color": "#6B7280", "margin": "md", "wrap": True},
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "提示：輸入「刪除上一筆」可撤銷、「你記少了,是X大卡」可更正最近一筆。", "size": "xs", "color": "#6B7280", "wrap": True}
-            ]
-        }
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": body_contents}
     }
 
 def build_profile_text(profile):
@@ -331,85 +350,6 @@ def get_quick_reply(user_id=None):
             QuickReplyButton(action=MessageAction(label="全家推薦", text="全家推薦"))
         ]
     return QuickReply(items=store_items + base_items)
-
-def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, last_logged_info=None):
-    rem_cal = max(0, target_cal - cals)
-    rem_protein = max(0, target_protein - protein)
-
-    cal_pct = min(100, max(0, int((cals / target_cal) * 100))) if target_cal > 0 else 0
-    protein_pct = min(100, max(0, int((protein / target_protein) * 100))) if target_protein > 0 else 0
-
-    cal_subtext = f"└ 已超出上限：{cals - target_cal} kcal" if cals > target_cal else f"└ 剩餘額度：{rem_cal} kcal"
-    protein_subtext = "└ 蛋白質已成功達標！" if protein >= target_protein else f"└ 距離目標：還差 {rem_protein} g"
-
-    body_contents = []
-
-    if last_logged_info:
-        body_contents.extend([
-            {
-                "type": "box", "layout": "vertical", "backgroundColor": "#ECFDF5", "cornerRadius": "md", "paddingAll": "md",
-                "contents": [
-                    {"type": "text", "text": "成功寫入飲食紀錄", "size": "xs", "color": "#059669", "weight": "bold"},
-                    {"type": "text", "text": f"{last_logged_info.get('food', '')}", "size": "sm", "weight": "bold", "color": "#065F46", "margin": "xs", "wrap": True},
-                    {"type": "text", "text": f"+{last_logged_info.get('cal', 0)} kcal ｜ +{last_logged_info.get('protein', 0)} g 蛋白質", "size": "xs", "color": "#047857", "margin": "xs"}
-                ]
-            },
-            {"type": "separator", "margin": "md"}
-        ])
-
-    disp_goal = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
-
-    body_contents.extend([
-        {
-            "type": "box", "layout": "vertical",
-            "contents": [
-                {
-                    "type": "box", "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "熱量攝取", "size": "sm", "weight": "bold", "color": "#374151"},
-                        {"type": "text", "text": f"{cals} / {target_cal} kcal ({cal_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
-                    ]
-                },
-                {
-                    "type": "box", "layout": "vertical", "backgroundColor": "#E5E7EB", "height": "8px", "cornerRadius": "4px", "margin": "sm",
-                    "contents": [{"type": "box", "layout": "vertical", "backgroundColor": "#EF4444" if cal_pct >= 100 else "#27AE60", "height": "8px", "width": f"{max(3, cal_pct)}%", "cornerRadius": "4px", "contents": []}]
-                },
-                {"type": "text", "text": cal_subtext, "size": "xs", "color": "#9CA3AF", "margin": "xs"}
-            ]
-        },
-        {"type": "separator"},
-        {
-            "type": "box", "layout": "vertical",
-            "contents": [
-                {
-                    "type": "box", "layout": "horizontal",
-                    "contents": [
-                        {"type": "text", "text": "蛋白質攝取", "size": "sm", "weight": "bold", "color": "#374151"},
-                        {"type": "text", "text": f"{protein} / {target_protein} g ({protein_pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
-                    ]
-                },
-                {
-                    "type": "box", "layout": "vertical", "backgroundColor": "#E5E7EB", "height": "8px", "cornerRadius": "4px", "margin": "sm",
-                    "contents": [{"type": "box", "layout": "vertical", "backgroundColor": "#3B82F6", "height": "8px", "width": f"{max(3, protein_pct)}%", "cornerRadius": "4px", "contents": []}]
-                },
-                {"type": "text", "text": protein_subtext, "size": "xs", "color": "#9CA3AF", "margin": "xs"}
-            ]
-        },
-        {"type": "separator"},
-        {"type": "text", "text": "提示：輸入「刪除上一筆」可撤銷最近一次紀錄。", "size": "xs", "color": "#6B7280", "wrap": True}
-    ])
-
-    return {
-        "type": "bubble", "size": "mega",
-        "header": {
-            "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
-            "contents": [
-                {"type": "text", "text": "紀錄成功與今日進度" if last_logged_info else "今日攝取總計與進度", "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"目前模式：{disp_goal}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
-            ]
-        },
-        "body": {"type": "box", "layout": "vertical", "spacing": "md", "paddingAll": "lg", "contents": body_contents}
-    }
 
 def parse_basic_profile(raw_text, strict=False):
     """從訊息解析身高/體重/年齡。
@@ -870,7 +810,8 @@ def handle_postback(event):
 
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
 
-        summary_flex = build_summary_flex_card(total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
+        meals_now = get_today_meals_list(profile["id"])
+        summary_flex = build_today_card(meals_now, total_c, target_cal, total_p, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
         line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "reroll":
@@ -1012,27 +953,25 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id)))
             return
 
-        if any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
+        if user_msg == "查看今日卡路里" or any(k in user_msg for k in ["今天吃了啥", "今天吃了什麼", "今天吃了哪些", "吃了啥", "吃了什麼", "飲食紀錄", "紀錄明細"]):
             meals = get_today_meals_list(user_id)
-            if not meals:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="今天尚無任何飲食紀錄。", quick_reply=get_quick_reply(user_id)))
-                return
-            cals, protein = get_today_summary(user_id)
-            detail_flex = build_meals_detail_flex_card(meals, cals, protein, target_cal, target_protein)
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"今日飲食明細({len(meals)}筆)", contents=detail_flex, quick_reply=get_quick_reply(user_id)))
+            cals, protein = (
+                sum(int(m.get("calories") or 0) for m in meals),
+                sum(int(m.get("protein_g") or 0) for m in meals),
+            )
+            today_flex = build_today_card(meals, cals, protein, target_cal, target_protein, profile.get("goal"))
+            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
         if user_msg in ["刪除上一筆", "刪除紀錄"]:
             del_msg = delete_last_meal(user_id)
-            cals, protein = get_today_summary(user_id)
-            summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
+            meals = get_today_meals_list(user_id)
+            cals, protein = (
+                sum(int(m.get("calories") or 0) for m in meals),
+                sum(int(m.get("protein_g") or 0) for m in meals),
+            )
+            summary_flex = build_today_card(meals, cals, protein, target_cal, target_protein, profile.get("goal"))
             line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
-            return
-
-        if user_msg == "查看今日卡路里":
-            cals, protein = get_today_summary(user_id)
-            summary_flex = build_summary_flex_card(cals, target_cal, protein, target_protein, profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="BiteLogic 今日攝取進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
             return
 
         last_restaurant = get_last_restaurant(profile)
@@ -1065,16 +1004,18 @@ def handle_message(event):
             if ai_res.get("is_correction"):
                 corrected = update_last_meal(user_id, ai_res)
                 if corrected:
-                    total_cal_now, total_protein_now = get_today_summary(user_id)
-                    summary_flex = build_summary_flex_card(total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"))
-                    line_bot_api.reply_message(event.reply_token, [
-                        TextSendMessage(text=f"已更正上一筆紀錄:\n{corrected['food_name']} → {corrected['calories']} kcal / {corrected['protein_g']} g 蛋白質"),
-                        FlexSendMessage(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
-                    ])
+                    meals_now = get_today_meals_list(user_id)
+                    total_cal_now, total_protein_now = (
+                        sum(int(m.get("calories") or 0) for m in meals_now),
+                        sum(int(m.get("protein_g") or 0) for m in meals_now),
+                    )
+                    summary_flex = build_today_card(meals_now, total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": corrected["food_name"], "cal": corrected["calories"], "protein": corrected["protein_g"]}, info_label="已更正最近一筆紀錄")
+                    line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
                     return
                 # 今日無紀錄可更正 -> 往下當成新紀錄寫入
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
-            summary_flex = build_summary_flex_card(total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
+            meals_now = get_today_meals_list(user_id)
+            summary_flex = build_today_card(meals_now, total_cal_now, target_cal, total_protein_now, target_protein, profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
