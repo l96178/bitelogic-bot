@@ -294,30 +294,6 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": body_contents}
     }
 
-def build_profile_text(profile):
-    """組出個人檔案完整文字(含 BMR/TDEE 推導),供「個人檔案」指令與建檔成功共用邏輯。"""
-    raw = profile.get("raw_profile_text") or ""
-    h, w, a, g = profile.get("height_cm"), profile.get("weight_kg"), profile.get("age") or 30, profile.get("gender") or "男"
-    goal_disp = GOAL_MAP_TO_DISP.get(profile.get("goal"), profile.get("goal")) or "減脂"
-
-    parts = [p.strip() for p in raw.split("/")]
-    act = parts[5] if len(parts) >= 7 else "未設定"
-    meal = parts[6] if len(parts) >= 7 else "未設定"
-
-    bmr, tdee, calc_tc, calc_tp = calculate_metabolic_profile(w, h, a, g, profile.get("goal"), raw, raw)
-    tc = profile.get("target_calories") or calc_tc
-    tp = profile.get("target_protein_g") or calc_tp
-    pct = int(round(tc / tdee * 100)) if tdee else 0
-
-    return (
-        f"【我的健康檔案】\n\n"
-        f"基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲 / {g}\n"
-        f"目標模式：{goal_disp}\n活動程度：{act}\n飲食習慣：{meal}\n\n"
-        f"代謝估算：\n• 基礎代謝率 BMR：約 {bmr} kcal\n• 每日總消耗 TDEE：約 {tdee} kcal\n\n"
-        f"每日控制目標：\n• 總熱量：{tc} kcal（約 TDEE 的 {pct}%）\n• 蛋白質：{tp} g\n\n"
-        f"提示：輸入「修改檔案」可重新建檔；輸入「體重 104.5」可更新體重並同步目標。"
-    )
-
 def get_quick_reply(user_id=None):
     base_items = [
         QuickReplyButton(action=MessageAction(label="今日卡路里", text="查看今日卡路里")),
@@ -739,10 +715,13 @@ def update_last_meal(user_id, intent_data):
         return None
     last = meals[-1]
     upd = {}
-    if intent_data.get("calories") is not None:
-        upd["calories"] = int(round(float(intent_data["calories"])))
-    if intent_data.get("protein_g") is not None:
-        upd["protein_g"] = int(round(float(intent_data["protein_g"])))
+    # 只接受正值:用戶僅更正單一數值時,模型可能對另一欄填 0,不可把原本正確的值覆寫成 0
+    cal_v = intent_data.get("calories")
+    pro_v = intent_data.get("protein_g")
+    if cal_v is not None and float(cal_v) > 0:
+        upd["calories"] = int(round(float(cal_v)))
+    if pro_v is not None and float(pro_v) > 0:
+        upd["protein_g"] = int(round(float(pro_v)))
     if not upd:
         return None
     supabase.table("meal_items").update(upd).eq("id", last["id"]).execute()
@@ -786,7 +765,8 @@ def handle_postback(event):
         rec = get_pending_recommendation(rec_id) if rec_id else None
         profile = get_user_profile(line_user_id)
 
-        if not rec or not profile:
+        # 所有權檢查:防止群組情境下按到別人的卡片
+        if not rec or not profile or rec.get("_user_id") != profile["id"]:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這張推薦卡片已過期，請重新輸入餐廳名稱取得新菜單。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
             return
 
@@ -819,7 +799,7 @@ def handle_postback(event):
         rec = get_pending_recommendation(rec_id) if rec_id else None
         profile = get_user_profile(line_user_id)
 
-        if not rec or not profile:
+        if not rec or not profile or rec.get("_user_id") != profile["id"]:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這張推薦卡片已過期，請重新輸入餐廳名稱取得新菜單。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
             return
 
@@ -840,6 +820,13 @@ def handle_postback(event):
             sum(int(m.get("calories") or 0) for m in today_meals),
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
+
+        # 額度已滿時不再產生新推薦(與主流程一致)
+        if today_stats[0] >= target_cal:
+            over_cal = today_stats[0] - target_cal
+            status_str = f"已超標 {over_cal} kcal" if over_cal > 0 else "已完全額滿"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⚠️ 今日熱量額度已達上限囉！（{status_str}）\n\n今天不建議再攝取任何額外熱量，明天再來看新推薦吧！", quick_reply=get_quick_reply(user_id)))
+            return
 
         ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), synthetic_msg, last_restaurant=restaurant, today_meals=today_meals, menu_context=menu_context, avoid_items=prev_items, explicit_store=restaurant)
 
@@ -981,7 +968,7 @@ def handle_message(event):
         es_match = re.match(r'^(.{1,15}?)(?:的)?推薦$', user_msg)
         if es_match:
             candidate = es_match.group(1).strip()
-            if candidate and not any(w in candidate for w in ["什麼", "其他", "別的", "怎麼", "如何"]):
+            if candidate and not any(w in candidate for w in ["什麼", "其他", "別的", "怎麼", "如何", "換", "再來", "還有"]):
                 explicit_store = candidate
 
         # 「我吃了X」等回報語氣、以及「記少了/其實是X大卡」等更正語氣 = 紀錄類意圖,不可被判成推薦
@@ -1036,10 +1023,10 @@ def handle_message(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集", quick_reply=get_quick_reply(user_id)))
 
-    except Exception as e:
+    except Exception:
         print("❌ 處理訊息失敗系統 Log：")
         print(traceback.format_exc())
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"系統處理失敗，請重試：{str(e)}", quick_reply=get_quick_reply(profile.get("id"))))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="系統處理失敗，請稍後重試。", quick_reply=get_quick_reply(profile.get("id") if profile else None)))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
