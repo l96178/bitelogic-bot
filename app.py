@@ -53,6 +53,7 @@ class LogResult(BaseModel):
     calories: float
     protein_g: float
     is_correction: Optional[bool] = Field(default=None, description="用戶在更正上一筆紀錄的數值時為 true，此時 calories/protein_g 填更正後的完整正確值(不是差額)")
+    needs_detail: Optional[bool] = Field(default=None, description="用戶只講了店名或含糊帶過(如「我吃麥當勞」「吃了便當」)、沒有具體品項時為 true。此時嚴禁編造熱量數字")
 
 class RecommendationResult(BaseModel):
     """用戶想知道某餐廳怎麼點 → 產生口袋菜單。items 為菜單本體，必須列出 1~5 個具體單品。"""
@@ -439,6 +440,39 @@ def get_weight_history_text(user_id, limit=8):
         lines.append(f"\n區間變化:{'↓' if total < 0 else '↑'} {abs(total)} kg")
     return "\n".join(lines)
 
+VAGUE_FOOD_WORDS = ["飲食紀錄", "餐點", "未知", "一餐", "套餐組合", "外食", "正餐"]
+MEAL_WORDS = ["便當", "早餐", "午餐", "晚餐", "宵夜", "點心", "自助餐", "小吃", "火鍋", "麵", "飯"]
+
+def is_vague_log(ai_res):
+    """判斷這筆紀錄是否資訊不足(只有店名/含糊描述)。AI 未主動標記時的代碼防線。"""
+    if ai_res.get("needs_detail"):
+        return True
+    name = re.sub(r'^【.*?】', '', (ai_res.get("food_name") or "")).strip()
+    if not name:
+        return True
+    restaurant = (ai_res.get("restaurant") or "").strip()
+    if restaurant and name.replace(restaurant, "").strip() in ["", "飲食紀錄", "餐點", "一餐"]:
+        return True
+    if any(w in name for w in VAGUE_FOOD_WORDS):
+        return True
+    # 純粹只是餐別或食物大類，沒有具體品項
+    if len(name) <= 4 and any(name == w for w in MEAL_WORDS):
+        return True
+    return False
+
+def build_ask_detail_reply(ai_res, user_id):
+    restaurant = (ai_res.get("restaurant") or "").strip()
+    store_txt = f"【{restaurant}】" if restaurant and restaurant != "null" else "這一餐"
+    items = [QuickReplyButton(action=MessageAction(label="今日卡路里", text="查看今日卡路里"))]
+    if restaurant and restaurant != "null":
+        items.insert(0, QuickReplyButton(action=MessageAction(label=f"{restaurant}推薦", text=f"{restaurant}推薦")))
+    return TextSendMessage(
+        text=(f"想幫你記錄{store_txt}，但同一家店不同餐點熱量可能差三倍以上，"
+              f"我不想猜錯數字。\n\n可以告訴我你吃了哪些嗎？例如：「大麥克、中薯、無糖紅茶」。\n\n"
+              f"若還沒點餐，也可以先看看推薦怎麼點。"),
+        quick_reply=QuickReply(items=items)
+    )
+
 def get_last_meal_brief(user_id):
     """取回今日最後一筆紀錄的摘要(含距今幾分鐘),供 AI 判斷用戶是否在補述同一餐。"""
     today = get_today_str()
@@ -565,6 +599,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
 {menu_section}{avoid_section}{store_section}{last_meal_section}
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
+      嚴禁編造:若用戶只說了店名或含糊帶過(如「我吃麥當勞」「吃了便當」「午餐吃自助餐」)、沒有講出具體品項或份量，同一家店的熱量可能相差三倍以上，此時必須設 needs_detail=true(calories/protein_g 填 0 即可)，不可自行假設一個平均值。只有用戶講出具體品項(如「大麥克加中薯」)時才給數字。
       若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則(份量最優先): 用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal，因此**這一餐必須吃到 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal**。給出明顯低於此區間的組合是嚴重錯誤(會害用戶下一餐被迫暴食)，寧可份量加大、加點主食或加倍肉量，也不可湊出一份 400~600 kcal 的輕食。total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
@@ -1120,6 +1155,11 @@ def handle_message(event):
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
+            # 資訊不足(只講店名)時不編造數字，改為詢問具體品項
+            if not ai_res.get("is_correction") and is_vague_log(ai_res):
+                line_bot_api.reply_message(event.reply_token, build_ask_detail_reply(ai_res, user_id))
+                return
+
             if ai_res.get("is_correction"):
                 corrected = update_last_meal(user_id, ai_res)
                 if corrected:
