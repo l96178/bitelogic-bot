@@ -33,7 +33,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-SYSTEM_PROMPT = "你是 BiteLogic 外食營養師。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
+SYSTEM_PROMPT = "你是 BiteLogic 外食營養師，只處理飲食、營養、熱量與餐廳選擇相關的事。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
+
+BOT_CAPABILITIES = "目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、更正或刪除最近一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。尚未開放:週報月報、拍照辨識、主動提醒推播。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
@@ -608,8 +610,12 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
       丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
       若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
       填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
-    C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
-      重要:你沒有刪除或修改資料庫的能力。若用戶要求刪除紀錄，絕不可聲稱「已刪除」，只能回覆請他輸入「刪除上一筆」。
+    C.一般對話/問額度(type=chat): 填 reply_text。
+      服務範圍:只回答飲食、營養、熱量、餐廳選擇、以及本服務功能的問題。
+      與飲食無關的請求(寫程式、翻譯、數學計算、查新聞、寫文案、情感諮詢等)一律婉拒並拉回本業，例如「我是外食營養師，這方面幫不上忙，但可以幫你規劃下一餐怎麼吃」。絕不可答應、也不可反問對方需要什麼功能。
+      能力誠實:{BOT_CAPABILITIES} 用戶詢問尚未開放的功能時，直接說明目前沒有這項功能，不可自行發明操作方式或承諾。
+      你沒有刪除或修改資料庫的能力。若用戶要求刪除紀錄，絕不可聲稱「已刪除」，只能回覆請他輸入「刪除上一筆」。
+      只有在用戶詢問額度、進度、還能吃多少時，才提到「熱量剩{rem_cal}kcal、蛋白質差{rem_protein}g」；其他情況不要硬塞這些數字。
     """
     # 查表命中 -> 用自建權威資料,不需搜尋;未命中 -> 開 Google Search 讓模型查即時資料,而非憑記憶猜
     use_search = menu_str is None
