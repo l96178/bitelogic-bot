@@ -242,7 +242,13 @@ def build_summary_flex_card(cals, target_cal, protein, target_protein, goal, las
         "body": {"type": "box", "layout": "vertical", "spacing": "md", "paddingAll": "lg", "contents": body_contents}
     }
 
-def parse_basic_profile(raw_text):
+def parse_basic_profile(raw_text, strict=False):
+    """從訊息解析身高/體重/年齡。
+    strict=True（已建檔用戶）：只接受「數字/數字/數字」的明確建檔格式，
+    避免一般訊息裡恰好出現的數字（如「7-11推薦」「御飯糰250卡」）誤觸重新建檔。"""
+    if strict and not re.search(r'\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?', raw_text):
+        return None
+
     parsed = {}
     nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
     if len(nums) >= 3:
@@ -257,6 +263,9 @@ def parse_basic_profile(raw_text):
             a_filtered = [item for item in a if item != parsed.get("height_cm") and item != parsed.get("weight_kg")]
             parsed["age"] = format_num(a_filtered[0]) if a_filtered else 30
     elif len(nums) == 2:
+        # 兩數字也必須通過合理範圍檢查（修復「7-11」被當成 7cm/11kg 的 bug）
+        if not (50 <= nums[0] <= 250 and 20 <= nums[1] <= 300):
+            return None
         parsed["height_cm"], parsed["weight_kg"], parsed["age"] = format_num(nums[0]), format_num(nums[1]), 30
 
     parsed["gender"] = "女" if "女" in raw_text else "男"
@@ -665,7 +674,7 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="【重新建立專屬健康檔案】\n\n請直接回覆基本數據：\n【身高 / 體重 / 年齡 / 性別】\n\n範例：173 / 85 / 30 / 男"))
         return
 
-    basic_profile = parse_basic_profile(user_msg)
+    basic_profile = parse_basic_profile(user_msg, strict=bool(profile))
 
     if not profile or basic_profile:
         if basic_profile:
