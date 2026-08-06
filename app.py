@@ -87,6 +87,8 @@ def normalize_ai_result(d):
                 if d.get(alias):
                     d["food_name"] = d.pop(alias)
                     break
+        if not d.get("food_name") and "calories" in d:
+            d["food_name"] = "未知餐點"
     elif t == "recommendation":
         if "total_cal" not in d and "calories" in d: d["total_cal"] = d.pop("calories")
         if "total_protein" not in d and "protein_g" in d: d["total_protein"] = d.pop("protein_g")
@@ -400,12 +402,12 @@ def get_menu_context(user_msg, last_restaurant=None):
         pass
     return None, None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None, expected_log=False):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
 
-    # 用戶明確指定店家時，上次餐廳不可干擾判斷
-    if explicit_store:
+    # 用戶明確指定店家時，上次餐廳不可干擾判斷；回報吃了什麼時同理
+    if explicit_store or expected_log:
         last_restaurant = None
 
     rem_cal, rem_protein = max(0, target_cal - cal), max(0, target_protein - protein)
@@ -428,6 +430,8 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     store_section = ""
     if explicit_store:
         store_section = f"\n    【用戶明確指定餐廳:{explicit_store}】restaurant 欄位與所有品項必須屬於此店，嚴禁使用任何其他店家。\n"
+    if expected_log:
+        store_section += "\n    【此訊息是飲食紀錄回報】用戶在告知已經吃了什麼，必須輸出 type=log，絕不可輸出推薦。\n"
 
     prompt = f"""
     {SYSTEM_PROMPT}
@@ -437,7 +441,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     用戶說:"{user_msg}"
 {menu_section}{avoid_section}{store_section}
     判斷意圖，依 schema 輸出對應欄位:
-    A.飲食紀錄(type=log): 欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
+    A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則: total_cal 須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal 之間; total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
@@ -493,8 +497,16 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
             result = _parse(res_text)
         except Exception:
             print("⚠️ schema 驗證失敗，帶糾正指令重試一次")
-            res_text = _call("\n注意：必須嚴格使用 schema 欄位名。type=log 用 food_name/calories/protein_g；type=recommendation 用 items/total_cal/total_protein；type=chat 用 reply_text。")
+            res_text = _call("\n注意：維持你原本判斷的意圖類型不變，只修正欄位名。type=log 用 food_name/calories/protein_g；type=recommendation 用 items/total_cal/total_protein；type=chat 用 reply_text。")
             result = _parse(res_text)
+
+        # 防線4：明確的紀錄語氣卻回了推薦 -> 糾正重試一次
+        if expected_log and result["type"] == "recommendation":
+            print("⚠️ 紀錄語氣卻回推薦，糾正重試")
+            res_text = _call("\n糾正：用戶是在回報已經吃了的食物，必須輸出 type=log(填 food_name/calories/protein_g)，不是推薦。")
+            result = _parse(res_text)
+            if result["type"] == "recommendation":
+                return {"type": "chat", "reply_text": "抱歉沒聽懂，請再描述一次你吃了什麼(例如:我吃了7-11茶葉蛋)。"}
 
         # 防線2：若判為推薦但菜單仍為空，帶著糾正指令重試一次
         if result["type"] == "recommendation" and not result.get("items"):
@@ -861,6 +873,9 @@ def handle_message(event):
             if candidate and not any(w in candidate for w in ["什麼", "其他", "別的", "怎麼", "如何"]):
                 explicit_store = candidate
 
+        # 「我吃了X」「剛吃了X」等回報語氣 = 飲食紀錄意圖,不可被判成推薦
+        expected_log = bool(re.match(r'^\s*(我|本人)?\s*(今天|早上|中午|晚上|早餐|午餐|晚餐|宵夜)?\s*(剛剛?|已經)?\s*(吃|喝)了', user_msg))
+
         menu_context = get_menu_context(user_msg, last_restaurant)
         today_meals = get_today_meals_list(user_id)
         today_stats = (
@@ -868,7 +883,7 @@ def handle_message(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
