@@ -127,7 +127,8 @@ def get_last_restaurant(profile, max_age_days=3):
             pass
     return store
 
-def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
+def calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
+    """回傳 (bmr, tdee, target_cal, target_protein) 完整代謝數據。"""
     weight = float(weight_kg) if weight_kg else 70.0
     height = float(height_cm) if height_cm else 170.0
     age_num = float(age) if age else 30.0
@@ -150,12 +151,40 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     max_protein = 180 if weight >= 90 else 200
     target_protein = int(min(weight * 1.6, max_protein))
 
+    return int(bmr), int(tdee), target_cal, target_protein
+
+def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern):
+    _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
+
+def build_profile_text(profile):
+    """組出個人檔案完整文字(含 BMR/TDEE 推導),供「個人檔案」指令與建檔成功共用邏輯。"""
+    raw = profile.get("raw_profile_text") or ""
+    h, w, a, g = profile.get("height_cm"), profile.get("weight_kg"), profile.get("age") or 30, profile.get("gender") or "男"
+    goal_disp = GOAL_MAP_TO_DISP.get(profile.get("goal"), profile.get("goal")) or "減脂"
+
+    parts = [p.strip() for p in raw.split("/")]
+    act = parts[5] if len(parts) >= 7 else "未設定"
+    meal = parts[6] if len(parts) >= 7 else "未設定"
+
+    bmr, tdee, calc_tc, calc_tp = calculate_metabolic_profile(w, h, a, g, profile.get("goal"), raw, raw)
+    tc = profile.get("target_calories") or calc_tc
+    tp = profile.get("target_protein_g") or calc_tp
+    pct = int(round(tc / tdee * 100)) if tdee else 0
+
+    return (
+        f"【我的健康檔案】\n\n"
+        f"基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲 / {g}\n"
+        f"目標模式：{goal_disp}\n活動程度：{act}\n飲食習慣：{meal}\n\n"
+        f"代謝估算：\n• 基礎代謝率 BMR：約 {bmr} kcal\n• 每日總消耗 TDEE：約 {tdee} kcal\n\n"
+        f"每日控制目標：\n• 總熱量：{tc} kcal（約 TDEE 的 {pct}%）\n• 蛋白質：{tp} g\n\n"
+        f"提示：輸入「修改檔案」可重新建檔；輸入「體重 104.5」可更新體重並同步目標。"
+    )
 
 def get_quick_reply(user_id=None):
     base_items = [
         QuickReplyButton(action=MessageAction(label="今日卡路里", text="查看今日卡路里")),
-        QuickReplyButton(action=MessageAction(label="修改個人檔案", text="修改檔案"))
+        QuickReplyButton(action=MessageAction(label="個人檔案", text="個人檔案"))
     ]
     store_items = []
     if user_id:
@@ -767,7 +796,8 @@ def handle_postback(event):
         g, goal_text, act, meal = data.get("g", ["男"])[0], data.get("goal", ["減脂"])[0], data.get("act", ["久坐辦公"])[0], data.get("meal", ["一天三餐"])[0]
 
         db_goal = GOAL_MAP_TO_DB.get(goal_text, "fat_loss")
-        target_cal, target_protein = calculate_precise_targets(w, h, a, g, goal_text, act, meal)
+        bmr, tdee, target_cal, target_protein = calculate_metabolic_profile(w, h, a, g, goal_text, act, meal)
+        pct = int(round(target_cal / tdee * 100)) if tdee else 0
         full_profile_text = f"身高{format_num(h)}cm / 體重{format_num(w)}kg / {format_num(a)}歲 / {g} / {goal_text} / {act} / {meal}"
 
         payload = {
@@ -781,8 +811,9 @@ def handle_postback(event):
         reply_text = (
             f"【專屬健康檔案建檔成功】\n\n基本數據：{format_num(h)}cm / {format_num(w)}kg / {format_num(a)}歲\n"
             f"目標模式：{goal_text}\n活動程度：{act}\n飲食習慣：{meal}\n\n"
-            f"您的每日精準控制目標：\n• 建議總熱量：約 {target_cal} kcal / 日\n• 建議蛋白質：約 {target_protein} g / 日\n\n"
-            f"提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳（如：麥當勞、sukiya）！"
+            f"代謝估算：\n• 基礎代謝率 BMR：約 {bmr} kcal\n• 每日總消耗 TDEE：約 {tdee} kcal\n\n"
+            f"您的每日精準控制目標：\n• 建議總熱量：約 {target_cal} kcal / 日（約 TDEE 的 {pct}%）\n• 建議蛋白質：約 {target_protein} g / 日\n\n"
+            f"提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳！"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(new_profile["id"] if new_profile else None)))
 
@@ -819,6 +850,11 @@ def handle_message(event):
 
         if not target_cal or not target_protein:
             target_cal, target_protein = calculate_precise_targets(profile.get("weight_kg"), profile.get("height_cm"), profile.get("age", 30), profile.get("gender"), profile.get("goal"), raw_p_text, raw_p_text)
+
+        # 個人檔案指令:顯示完整檔案(含 BMR/TDEE 推導)
+        if user_msg in ["個人檔案", "我的檔案", "查看檔案", "查看個人檔案"]:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=build_profile_text(profile), quick_reply=get_quick_reply(user_id)))
+            return
 
         # 體重指令:查詢趨勢
         if user_msg in ["體重紀錄", "體重記錄", "體重趨勢"]:
