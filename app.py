@@ -439,6 +439,51 @@ def get_weight_history_text(user_id, limit=8):
         lines.append(f"\n區間變化:{'↓' if total < 0 else '↑'} {abs(total)} kg")
     return "\n".join(lines)
 
+def get_last_meal_brief(user_id):
+    """取回今日最後一筆紀錄的摘要(含距今幾分鐘),供 AI 判斷用戶是否在補述同一餐。"""
+    today = get_today_str()
+    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
+    if not log_res.data:
+        return None
+    res = supabase.table("meal_items").select("food_name, calories, protein_g, created_at").eq("daily_log_id", log_res.data[0]["id"]).order("created_at", desc=True).limit(1).execute()
+    if not res.data:
+        return None
+    m = res.data[0]
+    mins = None
+    try:
+        dt = datetime.fromisoformat(str(m["created_at"]).replace("Z", "+00:00"))
+        mins = int((datetime.now(timezone.utc) - dt).total_seconds() // 60)
+    except Exception:
+        pass
+    return {"food_name": m["food_name"], "calories": m["calories"], "protein_g": m["protein_g"], "minutes_ago": mins}
+
+DISAMBIG_LOG_SUFFIX = " — 已經吃了"
+DISAMBIG_REC_SUFFIX = " — 還沒吃，給我建議"
+
+def is_ambiguous_eating_msg(user_msg):
+    """判斷是否為「吃了/要吃」分不出來的模糊訊息(如「我午餐吃自助餐」)。
+    有明確時態或明確求推薦字眼者不算模糊，不打擾用戶。"""
+    if len(user_msg) > 40 or not re.search(r'[吃喝]', user_msg):
+        return False
+    # 已是明確的紀錄語氣
+    if re.search(r'([吃喝]了|剛[吃喝]|已經[吃喝])', user_msg):
+        return False
+    # 已是明確的求推薦/提問語氣
+    if re.search(r'(想[吃喝]|推薦|建議|該[吃喝]|要[吃喝]什麼|[吃喝]什麼|怎麼[吃點]|可以|能不能|嗎|呢|\?|？)', user_msg):
+        return False
+    return True
+
+def build_disambig_reply(user_msg):
+    """回覆兩顆按鈕讓用戶自己說明意圖。按鈕送出原訊息＋標記，代碼據此鎖定意圖。"""
+    base = user_msg[:250]
+    return TextSendMessage(
+        text="想確認一下：這是要記錄已經吃的，還是還沒吃、想請我推薦怎麼點？",
+        quick_reply=QuickReply(items=[
+            QuickReplyButton(action=MessageAction(label="記錄這餐", text=f"{base}{DISAMBIG_LOG_SUFFIX}")),
+            QuickReplyButton(action=MessageAction(label="給我推薦", text=f"{base}{DISAMBIG_REC_SUFFIX}"))
+        ])
+    )
+
 def get_menu_context(user_msg, last_restaurant=None):
     """查自建菜單庫 store_menus：若用戶訊息（或沿用的上次餐廳）命中某家店，
     回傳 (店名, 權威菜單字串) 注入 prompt，讓 AI 只負責「組合」、不負責「記憶」。
@@ -468,7 +513,7 @@ def get_menu_context(user_msg, last_restaurant=None):
         pass
     return None, None
 
-def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None, expected_log=False):
+def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, last_restaurant=None, today_meals=None, menu_context=None, avoid_items=None, explicit_store=None, expected_log=False, last_meal=None):
     cal, protein = today_stats
     target_cal, target_protein = target_stats
 
@@ -499,13 +544,25 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     if expected_log:
         store_section += "\n    【此訊息是飲食紀錄回報】用戶在告知已經吃了什麼，必須輸出 type=log，絕不可輸出推薦。\n"
 
+    last_meal_section = ""
+    if last_meal:
+        mins = last_meal.get("minutes_ago")
+        when = f"{mins} 分鐘前" if mins is not None else "剛才"
+        last_meal_section = (
+            f"\n    【最近一筆紀錄】{when}已記錄:{last_meal['food_name']} "
+            f"({last_meal['calories']}kcal/{last_meal['protein_g']}g蛋白)。\n"
+            f"    若用戶這則訊息是在補充、修正或重述「這同一餐」的內容(例如補上配菜、更換其中某個品項、把整餐重講一次)，"
+            f"必須輸出 type=log 且 is_correction=true，food_name 寫這餐的完整內容、calories/protein_g 寫整餐更正後的總量(不是新增的部分)。"
+            f"只有在確定是另外吃的一餐時才輸出 is_correction=false。\n"
+        )
+
     prompt = f"""
     {SYSTEM_PROMPT}
 
     檔案:{profile_str}|上次餐廳:{last_restaurant or '無'}
     今日已攝取:{cal}/{target_cal}kcal,剩餘:{rem_cal}kcal|蛋白質還差:{rem_protein}g|剩餘餐數:{remaining_meals}
     用戶說:"{user_msg}"
-{menu_section}{avoid_section}{store_section}
+{menu_section}{avoid_section}{store_section}{last_meal_section}
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
       若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
@@ -517,6 +574,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
       若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
       填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
     C.一般對話/問額度(type=chat): 填 reply_text，精簡回覆(熱量剩{rem_cal}kcal,蛋白質差{rem_protein}g)。
+      重要:你沒有刪除或修改資料庫的能力。若用戶要求刪除紀錄，絕不可聲稱「已刪除」，只能回覆請他輸入「刪除上一筆」。
     """
     # 查表命中 -> 用自建權威資料,不需搜尋;未命中 -> 開 Google Search 讓模型查即時資料,而非憑記憶猜
     use_search = menu_str is None
@@ -744,7 +802,7 @@ def delete_last_meal(user_id):
     return f"已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
 
 def update_last_meal(user_id, intent_data):
-    """更正今日最後一筆紀錄的數值。回傳更正後的資料,無可更正時回 None。"""
+    """更正今日最後一筆紀錄(數值與品名)。回傳更正後的資料,無可更正時回 None。"""
     meals = get_today_meals_list(user_id)
     if not meals:
         return None
@@ -757,11 +815,24 @@ def update_last_meal(user_id, intent_data):
         upd["calories"] = int(round(float(cal_v)))
     if pro_v is not None and float(pro_v) > 0:
         upd["protein_g"] = int(round(float(pro_v)))
+
+    # 品名更正:保留原本的【店名】前綴(補述時 AI 常只給品項不給店名)
+    new_name = (intent_data.get("food_name") or "").strip()
+    if new_name:
+        old_prefix = re.match(r'^(【.*?】)', last["food_name"])
+        new_restaurant = intent_data.get("restaurant")
+        if new_restaurant and new_restaurant != "null":
+            upd["food_name"] = f"【{new_restaurant}】{new_name}" if not new_name.startswith("【") else new_name
+        elif old_prefix and not new_name.startswith("【"):
+            upd["food_name"] = f"{old_prefix.group(1)}{new_name}"
+        else:
+            upd["food_name"] = new_name
+
     if not upd:
         return None
     supabase.table("meal_items").update(upd).eq("id", last["id"]).execute()
     return {
-        "food_name": last["food_name"],
+        "food_name": upd.get("food_name", last["food_name"]),
         "calories": upd.get("calories", last["calories"]),
         "protein_g": upd.get("protein_g", last["protein_g"]),
     }
@@ -995,7 +1066,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
-        if user_msg in ["刪除上一筆", "刪除紀錄"]:
+        if re.search(r'(刪除|刪掉|移除|撤銷|取消).{0,6}(上一筆|最後一筆|最近一筆|這一筆|這筆|紀錄|記錄)', user_msg) or user_msg in ["刪除上一筆", "刪除紀錄"]:
             del_msg = delete_last_meal(user_id)
             meals = get_today_meals_list(user_id)
             cals, protein = (
@@ -1008,6 +1079,19 @@ def handle_message(event):
 
         last_restaurant = get_last_restaurant(profile)
 
+        # 釐清按鈕回傳:剝掉標記並鎖定意圖
+        forced_intent = None
+        if user_msg.endswith(DISAMBIG_LOG_SUFFIX):
+            user_msg = user_msg[:-len(DISAMBIG_LOG_SUFFIX)].strip()
+            forced_intent = "log"
+        elif user_msg.endswith(DISAMBIG_REC_SUFFIX):
+            user_msg = user_msg[:-len(DISAMBIG_REC_SUFFIX)].strip()
+            forced_intent = "recommendation"
+        # 語意模糊(如「我午餐吃自助餐」可能是紀錄也可能是求推薦)-> 先問清楚，不亂猜
+        elif is_ambiguous_eating_msg(user_msg):
+            line_bot_api.reply_message(event.reply_token, build_disambig_reply(user_msg))
+            return
+
         # 「X推薦」格式 = 用戶明確指定店家(如 Quick Reply 按鈕),推薦必須鎖定該店
         explicit_store = None
         es_match = re.match(r'^(.{1,15}?)(?:的)?推薦$', user_msg)
@@ -1017,19 +1101,22 @@ def handle_message(event):
                 explicit_store = candidate
 
         # 「我吃了X」等回報語氣、以及「記少了/其實是X大卡」等更正語氣 = 紀錄類意圖,不可被判成推薦
-        expected_log = bool(
+        expected_log = forced_intent == "log" or bool(
             re.match(r'^\s*(我|本人)?\s*(今天|早上|中午|晚上|早餐|午餐|晚餐|宵夜)?\s*(剛剛?|已經)?\s*(吃|喝)了', user_msg)
             or re.search(r'(記少|記多|記錯|寫錯|算錯|更正|修正|其實(是|有|才)|應該是\s*\d)', user_msg)
         )
+        # 用戶按了「給我推薦」-> 明確告知尚未進食，避免被判成紀錄
+        ai_msg = f"{user_msg}（還沒吃，請推薦這家店該怎麼點）" if forced_intent == "recommendation" else user_msg
 
         menu_context = get_menu_context(user_msg, last_restaurant)
         today_meals = get_today_meals_list(user_id)
+        last_meal = get_last_meal_brief(user_id)
         today_stats = (
             sum(int(m.get("calories") or 0) for m in today_meals),
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), user_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log)
+        ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), ai_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log, last_meal=last_meal)
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
