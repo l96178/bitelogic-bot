@@ -333,34 +333,116 @@ def get_quick_reply(user_id=None):
         ]
     return QuickReply(items=store_items + base_items)
 
+PROFILE_RANGES = {"height_cm": (100, 250), "weight_kg": (25, 300), "age": (10, 100)}
+BMI_RANGE = (12, 60)
+
 def parse_basic_profile(raw_text, strict=False):
-    """從訊息解析身高/體重/年齡。
+    """從訊息解析身高/體重/年齡/性別。
     strict=True（已建檔用戶）：只接受「數字/數字/數字」的明確建檔格式，
-    避免一般訊息裡恰好出現的數字（如「7-11推薦」「御飯糰250卡」）誤觸重新建檔。"""
+    避免一般訊息裡恰好出現的數字（如「7-11推薦」「御飯糰250卡」）誤觸重新建檔。
+
+    回傳 dict：成功時含 height_cm/weight_kg/age/gender(可為 None)/age_assumed；
+    數值不合理時回 {"error": 說明文字}；完全不像建檔訊息時回 None。
+    缺漏或不合理的欄位一律不猜（猜錯會讓整個熱量目標失準），由後續步驟詢問。
+    """
     if strict and not re.search(r'\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?', raw_text):
         return None
 
     parsed = {}
-    nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text)]
-    if len(nums) >= 3:
-        h = [n for n in nums if 50 <= n <= 250]
-        w = [n for n in nums if 20 <= n <= 300]
-        a = [n for n in nums if 10 <= n <= 100]
-        if h: parsed["height_cm"] = format_num(h[0])
-        if w:
-            w_filtered = [item for item in w if item != parsed.get("height_cm")]
-            if w_filtered: parsed["weight_kg"] = format_num(w_filtered[0])
-        if a:
-            a_filtered = [item for item in a if item != parsed.get("height_cm") and item != parsed.get("weight_kg")]
-            parsed["age"] = format_num(a_filtered[0]) if a_filtered else 30
-    elif len(nums) == 2:
-        # 兩數字也必須通過合理範圍檢查（修復「7-11」被當成 7cm/11kg 的 bug）
-        if not (50 <= nums[0] <= 250 and 20 <= nums[1] <= 300):
-            return None
-        parsed["height_cm"], parsed["weight_kg"], parsed["age"] = format_num(nums[0]), format_num(nums[1]), 30
 
-    parsed["gender"] = "女" if "女" in raw_text else "男"
-    return parsed if (parsed.get("height_cm") and parsed.get("weight_kg")) else None
+    # 1) 優先讀有標示的欄位（順序打反也不會錯）
+    labeled = {
+        "height_cm": r'(?:身高|高)\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:公分|cm|CM)',
+        "weight_kg": r'(?:體重|重)\s*[:：]?\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:公斤|kg|KG)',
+        "age": r'(?:年齡|歲數)\s*[:：]?\s*(\d+)|(\d+)\s*(?:歲|y|Y)',
+    }
+    used = set()
+    for field, pat in labeled.items():
+        m = re.search(pat, raw_text)
+        if m:
+            val = float(m.group(1) or m.group(2))
+            lo, hi = PROFILE_RANGES[field]
+            if lo <= val <= hi:
+                parsed[field] = format_num(val)
+                used.add(val)
+
+    # 2) 未標示的部分用位置推定（提示明確要求「身高 / 體重 / 年齡」的順序）
+    nums = [float(n) for n in re.findall(r'\d+(?:\.\d+)?', raw_text) if float(n) not in used]
+    order = [f for f in ("height_cm", "weight_kg", "age") if f not in parsed]
+    for field, val in zip(order, nums):
+        lo, hi = PROFILE_RANGES[field]
+        if lo <= val <= hi:
+            parsed[field] = format_num(val)
+
+    # 完全沒有可用數字 -> 不是建檔訊息
+    if not parsed:
+        return None
+
+    # 3) 身高體重都有時做 BMI 合理性檢查（抓出順序顛倒、漏填欄位）
+    h, w = parsed.get("height_cm"), parsed.get("weight_kg")
+    if h and w:
+        bmi = float(w) / ((float(h) / 100) ** 2)
+        if not (BMI_RANGE[0] <= bmi <= BMI_RANGE[1]):
+            return {"error": (f"這組數字看起來怪怪的：身高 {format_num(h)} 公分、體重 {format_num(w)} 公斤。\n"
+                              f"是不是順序寫反了，或漏了其中一項？\n\n"
+                              f"請照這個順序再傳一次：\n【身高 / 體重 / 年齡 / 性別】\n範例：173 / 85 / 30 / 男")}
+
+    # 4) 身高體重是必要欄位，缺一不可
+    if not h or not w:
+        missing = "身高" if not h else "體重"
+        return {"error": (f"還缺少「{missing}」，或是數字超出合理範圍。\n\n"
+                          f"請照這個順序再傳一次：\n【身高 / 體重 / 年齡 / 性別】\n範例：173 / 85 / 30 / 男")}
+
+    # 5) 年齡缺漏 -> 標記待詢問（不預設）
+    if not parsed.get("age"):
+        parsed["age"], parsed["age_assumed"] = None, True
+
+    # 6) 性別未明確提供 -> 不預設（男女 BMR 差 166 kcal）
+    if "女" in raw_text:
+        parsed["gender"] = "女"
+    elif "男" in raw_text:
+        parsed["gender"] = "男"
+    else:
+        parsed["gender"] = None
+
+    return parsed
+
+def build_age_quick_reply(h, w, g):
+    """年齡缺漏時的補問按鈕（取區間中位數，誤差約 ±5 歲 ≈ 25 kcal）。"""
+    opts = [("20-29 歲", 25), ("30-39 歲", 35), ("40-49 歲", 45), ("50 歲以上", 55)]
+    return QuickReply(items=[
+        QuickReplyButton(action=PostbackAction(
+            label=lab,
+            data=urlencode({"action": "step_age", "h": h, "w": w, "a": str(val), "g": g or ""}),
+            display_text=f"我選擇：{lab}"))
+        for lab, val in opts
+    ])
+
+def build_next_step_reply(h, w, a, g, prefix=""):
+    """依照還缺哪個欄位，決定下一步問什麼（年齡 -> 性別 -> 飲食目標）。"""
+    if not a:
+        return TextSendMessage(
+            text=f"{prefix}請選擇您的【年齡區間】：\n（用於估算基礎代謝率）",
+            quick_reply=build_age_quick_reply(h, w, g))
+    if not g:
+        q = QuickReply(items=[
+            QuickReplyButton(action=PostbackAction(label="男性", data=urlencode({"action": "step_gender", "h": h, "w": w, "a": a, "g": "男"}), display_text="我選擇：男性")),
+            QuickReplyButton(action=PostbackAction(label="女性", data=urlencode({"action": "step_gender", "h": h, "w": w, "a": a, "g": "女"}), display_text="我選擇：女性"))
+        ])
+        return TextSendMessage(
+            text=f"{prefix}請選擇您的【生理性別】：\n（男女基礎代謝率相差約 166 kcal）",
+            quick_reply=q)
+    return TextSendMessage(
+        text=f"{prefix}請選擇您的【飲食目標】：\n（直接點選下方按鈕）",
+        quick_reply=build_goal_quick_reply(h, w, a, g))
+
+def build_goal_quick_reply(h, w, a, g):
+    """飲食目標選擇按鈕，建檔流程與性別補問後共用。"""
+    return QuickReply(items=[
+        QuickReplyButton(action=PostbackAction(label="健康減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "減脂"}), display_text="我選擇：健康減脂")),
+        QuickReplyButton(action=PostbackAction(label="精準增肌", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌"}), display_text="我選擇：精準增肌")),
+        QuickReplyButton(action=PostbackAction(label="增肌減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌減脂"}), display_text="我選擇：增肌減脂"))
+    ])
 
 def get_or_create_daily_log_id(user_id):
     today = get_today_str()
@@ -1044,6 +1126,14 @@ def handle_postback(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "重新推薦失敗，請再試一次。", quick_reply=get_quick_reply(user_id)))
 
+    elif action == "step_age":
+        h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", [""])[0]
+        line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g, prefix=f"已設定年齡：約 {a} 歲\n\n"))
+
+    elif action == "step_gender":
+        h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
+        line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g, prefix=f"已設定生理性別：【{g}】\n\n"))
+
     elif action == "step_goal":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", ["男"])[0]
         goal = data.get("goal", ["減脂"])[0]
@@ -1116,13 +1206,16 @@ def handle_message(event):
 
     if not profile or basic_profile:
         if basic_profile:
-            h, w, a, g = str(basic_profile["height_cm"]), str(basic_profile["weight_kg"]), str(basic_profile.get("age", 30)), basic_profile["gender"]
-            q_items = [
-                QuickReplyButton(action=PostbackAction(label="健康減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "減脂"}), display_text="我選擇：健康減脂")),
-                QuickReplyButton(action=PostbackAction(label="精準增肌", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌"}), display_text="我選擇：精準增肌")),
-                QuickReplyButton(action=PostbackAction(label="增肌減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌減脂"}), display_text="我選擇：增肌減脂"))
-            ]
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"收到您的基本數據！\n({h}cm / {w}kg / {a}歲 / {g})\n\n請選擇您的【飲食目標】：\n（直接點選下方按鈕）", quick_reply=QuickReply(items=q_items)))
+            # 數值不合理（順序顛倒、漏填）-> 明確告知，不硬吞
+            if basic_profile.get("error"):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=basic_profile["error"]))
+                return
+
+            h, w = str(basic_profile["height_cm"]), str(basic_profile["weight_kg"])
+            a = str(basic_profile["age"]) if basic_profile.get("age") else ""
+            g = basic_profile.get("gender") or ""
+            known = f"收到！({h}cm / {w}kg" + (f" / {a}歲" if a else "") + (f" / {g}" if g else "") + ")\n\n"
+            line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g, prefix=known))
             return
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="歡迎來到 BiteLogic！\n\n首次使用請先建立專屬檔案\n\n請直接回覆基本數據：\n【身高 / 體重 / 年齡 / 性別】\n\n範例：173 / 85 / 30 / 男"))
