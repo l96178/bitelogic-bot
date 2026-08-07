@@ -109,8 +109,17 @@ class ChatResult(BaseModel):
     type: Literal["chat"]
     reply_text: str
 
+class ClarifyResult(BaseModel):
+    """分不出用戶是「已經吃了」還是「還沒吃、想請你推薦」。
+
+    這件事原本是用正規式在 AI 之前判斷的，但關鍵字讀不出語境 ——
+    「我一天只能吃一餐了，熱量幫我拉到5000卡」也含「我」和「吃」，就被誤判成模糊，
+    整句話因此連 AI 都沒看到。改由模型判斷，程式碼只負責把按鈕畫出來。
+    """
+    type: Literal["clarify"]
+
 AIResultAdapter = TypeAdapter(
-    Annotated[Union[LogResult, RecommendationResult, ChatResult], Field(discriminator="type")]
+    Annotated[Union[LogResult, RecommendationResult, ChatResult, ClarifyResult], Field(discriminator="type")]
 )
 
 def normalize_ai_result(d):
@@ -914,40 +923,6 @@ def get_last_meal_brief(user_id):
 DISAMBIG_LOG_SUFFIX = " — 已經吃了"
 DISAMBIG_REC_SUFFIX = " — 還沒吃，給我建議"
 
-def is_ambiguous_eating_msg(user_msg):
-    """判斷是否為「吃了/要吃」分不出來的模糊訊息(如「我午餐吃自助餐」)。
-    有明確時態或明確求推薦字眼者不算模糊，不打擾用戶。"""
-    # 真正分不出來的句子都很短、很單純：「我午餐吃自助餐」「中午吃麥當勞」。
-    # 排除清單是黑名單，本質上一定會漏（「我一天只能吃一餐了，熱量幫我拉到5000卡」
-    # 就漏過去了），所以先用句子的「形狀」把不像的濾掉：
-    # 太長、含數字（在談份量或目標，不是報告某一餐）一律不算模糊，交給 AI。
-    if len(user_msg) > 15 or not re.search(r'[吃喝]', user_msg):
-        return False
-    if re.search(r'\d', user_msg):
-        return False
-    # 在講作息或餐數（「我一天只能吃一餐」），不是在報告某一餐
-    if re.search(r'(一天|每天|平常|習慣|只能|沒辦法).{0,6}[吃喝]|[吃喝]\s*[一二三四五兩幾]\s*[餐頓]', user_msg):
-        return False
-    # 光有「吃/喝」不代表在講自己這一餐（「你去吃屎啦」也含吃）。
-    # 要有第一人稱或餐別/時間詞，才可能是在報告自己的飲食;否則交給 AI 判斷，
-    # 免得一句辱罵換來一則「這是要記錄已經吃的嗎？」加兩顆按鈕。
-    if not re.search(r'(我|自己|早餐|午餐|晚餐|宵夜|早上|中午|下午|晚上|今天|剛剛|等等|待會)', user_msg):
-        return False
-    # 已是明確的紀錄語氣
-    if re.search(r'([吃喝]了|剛[吃喝]|已經[吃喝])', user_msg):
-        return False
-    # 已是明確的求推薦/提問語氣。
-    # 這份清單刻意放寬:漏判(不跳確認)只是把判斷交回 AI，後面還有 expected_log /
-    # expected_rec / is_vague_log 三層守著;誤判(一直跳確認)則是純粹騷擾用戶。
-    # 「啥」和未來語氣是實測補上的 ——「下一餐吃啥好」原本會被當成模糊訊息。
-    if re.search(
-        r'(想[吃喝]|推薦|建議|該[吃喝]|怎麼[吃點]|可以|能不能'          # 求建議
-        r'|什麼|甚麼|啥|哪[家間一種]|如何|好不好|嗎|呢|吧|\?|？'        # 疑問語氣：問句不會是紀錄
-        r'|下[一]?餐|等等|待會|等一下|晚點|明天|之後)',                  # 未來語氣：還沒吃
-            user_msg):
-        return False
-    return True
-
 def build_disambig_reply(user_msg):
     """回覆兩顆按鈕讓用戶自己說明意圖。按鈕送出原訊息＋標記，代碼據此鎖定意圖。"""
     base = user_msg[:250]
@@ -1051,11 +1026,16 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
       ★輸出前務必自己驗算一次:把 items 每一項的 cal 加總，若總和低於 {int(meal_cal_cap*0.8)}，不可直接輸出——回頭加點主食、加大份量或多加一項，改到達標為止。
       (依據:用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal。份量不足會害他下一餐被迫暴食，寧可加大也不可湊一份 400~600 kcal 的輕食。高蛋白優先:肉類加量/加蛋/豆腐/無糖豆漿。)
       訊息只有店名或食物類別、沒有「吃了」這類完成語氣時(如「自助餐」「麥當勞」「想吃火鍋」)，一律視為求推薦。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
+      但若用戶只是問「吃什麼」、既沒指向店家也沒指向食物類別(如「晚餐吃什麼」「今天吃啥」「附近有什麼好吃的」)，**不要自己挑一家店** —— 改輸出 type=chat，簡短反問他想吃哪一家、並說明可以直接打店名。這種訊息的回覆會自動附上他常吃店家的按鈕，所以不必在文字裡列店名。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
       丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
       若該店品項組合實在無法達到蛋白質下限，取該店可達的最高蛋白組合，並在 warning 具體建議店外補充方式(如無糖豆漿、茶葉蛋、乳清)。
       填 restaurant、title(10字內主題)、items(每項含name/cal/protein)、warning、total_cal、total_protein。
+    D.意圖真的分不出來(type=clarify): 沒有其他欄位。
+      只在「已經吃了」和「還沒吃、想請你推薦」兩種讀法都成立、而且訊息裡沒有任何時態或語氣線索時才用，例如「我午餐吃自助餐」「中午吃麥當勞」——這種句子可能是在回報，也可能是在說等一下要去。
+      有下列任何一項就不可用 clarify:出現「吃了/剛吃/已經」等完成語氣(選 A)、出現「想吃/等等/推薦/什麼」等未來或提問語氣(選 B)、或訊息在談設定、額度、作息、抱怨、閒聊(選 C)。
+      拿不定主意時優先選 A/B/C，clarify 只留給真正五五波的句子——多問一次會打斷對話。
     C.一般對話/問額度(type=chat): 填 reply_text。
       服務範圍:只回答飲食、營養、熱量、餐廳選擇、以及本服務功能的問題。
       與飲食無關的請求(寫程式、翻譯、數學計算、查新聞、寫文案、情感諮詢等)一律婉拒並拉回本業，例如「我是外食營養師，這方面幫不上忙，但可以幫你規劃下一餐怎麼吃」。絕不可答應、也不可反問對方需要什麼功能。
@@ -1115,7 +1095,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
             result = _parse(res_text)
 
         # 防線4：明確的紀錄語氣卻回了推薦 -> 糾正重試一次
-        if expected_log and result["type"] == "recommendation":
+        if expected_log and result["type"] in ("recommendation", "clarify"):
             print("⚠️ 紀錄語氣卻回推薦，糾正重試")
             res_text = _call("\n糾正：用戶是在回報已經吃了的食物，必須輸出 type=log(填 food_name/calories/protein_g)，不是推薦。")
             result = _parse(res_text)
@@ -1143,7 +1123,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
                     return {"type": "chat", "reply_text": f"抱歉，剛剛推薦錯店了。請再傳一次「{explicit_store}推薦」。"}
 
         # 防線6：明確的求推薦語氣卻回了紀錄 -> 糾正重試一次
-        if expected_rec and result["type"] == "log":
+        if expected_rec and result["type"] in ("log", "clarify"):
             print("⚠️ 求推薦語氣卻回紀錄，糾正重試")
             res_text = _call("\n糾正：用戶說的是「想吃/要吃」，代表還沒吃，必須輸出 type=recommendation 給出這家店的點餐組合，不是 log。")
             result = _parse(res_text)
@@ -1680,10 +1660,6 @@ def handle_message(event):
         elif user_msg.endswith(DISAMBIG_REC_SUFFIX):
             user_msg = user_msg[:-len(DISAMBIG_REC_SUFFIX)].strip()
             forced_intent = "recommendation"
-        # 語意模糊(如「我午餐吃自助餐」可能是紀錄也可能是求推薦)-> 先問清楚，不亂猜
-        elif is_ambiguous_eating_msg(user_msg):
-            line_bot_api.reply_message(event.reply_token, build_disambig_reply(user_msg))
-            return
 
         # 「X推薦」格式 = 用戶明確指定店家(如 Quick Reply 按鈕),推薦必須鎖定該店
         explicit_store = None
@@ -1720,6 +1696,16 @@ def handle_message(event):
         show_loading(line_user_id)
         ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), ai_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log, last_meal=last_meal, expected_rec=expected_rec)
         msg_type = ai_res.get("type")
+
+        # 模型判定兩種讀法都成立 -> 讓用戶自己說。
+        # forced_intent 存在時代表用戶剛按過釐清按鈕，這時再問一次會變成無限迴圈。
+        if msg_type == "clarify":
+            if forced_intent:
+                # 用戶剛按過釐清按鈕，再問一次會變成迴圈；改問具體吃了什麼
+                line_bot_api.reply_message(event.reply_token, build_ask_detail_reply(ai_res, user_id))
+            else:
+                line_bot_api.reply_message(event.reply_token, build_disambig_reply(user_msg))
+            return
 
         if msg_type == "log":
             # AI 把上一筆的品項整串重述進來 = 誤把新食物併進了舊紀錄。
