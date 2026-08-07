@@ -923,6 +923,33 @@ def get_last_meal_brief(user_id):
 DISAMBIG_LOG_SUFFIX = " — 已經吃了"
 DISAMBIG_REC_SUFFIX = " — 還沒吃，給我建議"
 
+# 剩餘額度低於這個數就不再給正餐推薦。門檻不能設在「剛好用完」——
+# 剩 3 kcal 時 meal_cal_cap 會算出 3，模型不可能照做，結果是一張
+# 「單餐目標 3 kcal」對「本組合合計 850 kcal」自相矛盾的卡片（實測踩過）。
+MIN_MEAL_CAL = 300
+
+def build_quota_exhausted_text(cals, protein, target_cal, target_protein, store_display=None):
+    """額度不足以再吃一餐時的說法。
+
+    剩一點點和已經超標是兩回事，不能都說「已達上限」。
+    另外:熱量沒了但蛋白質還差一截是很常見的組合，這時直接說「什麼都別吃」沒有幫助，
+    要指出低熱量高蛋白的補法。"""
+    left = target_cal - cals
+    if left <= 0:
+        head = f"今日熱量額度{'已超標 ' + str(-left) + ' kcal' if left < 0 else '已完全額滿'}。"
+    else:
+        head = f"今日只剩 {left} kcal，湊不出一份完整的餐了。"
+
+    protein_left = max(0, target_protein - protein)
+    if protein_left > 0:
+        body = (f"蛋白質還差 {protein_left} g，可以用低熱量高蛋白的方式補："
+                f"無糖豆漿、水煮蛋白、無糖優格或乳清。")
+    elif store_display:
+        body = f"若一定要去【{store_display}】，請只選無糖茶類、零卡飲料或瓶裝水。"
+    else:
+        body = "今天不建議再攝取額外熱量，明天再來看新推薦吧。"
+    return f"⚠️ {head}\n\n{body}"
+
 def build_disambig_reply(user_msg):
     """回覆兩顆按鈕讓用戶自己說明意圖。按鈕送出原訊息＋標記，代碼據此鎖定意圖。"""
     base = user_msg[:250]
@@ -1395,11 +1422,11 @@ def handle_postback(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
-        # 額度已滿時不再產生新推薦(與主流程一致)
-        if today_stats[0] >= target_cal:
-            over_cal = today_stats[0] - target_cal
-            status_str = f"已超標 {over_cal} kcal" if over_cal > 0 else "已完全額滿"
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⚠️ 今日熱量額度已達上限囉！（{status_str}）\n\n今天不建議再攝取任何額外熱量，明天再來看新推薦吧！", quick_reply=get_quick_reply(user_id)))
+        # 額度不足以再吃一餐時不再產生新推薦(與主流程一致)
+        if target_cal - today_stats[0] < MIN_MEAL_CAL:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=build_quota_exhausted_text(today_stats[0], today_stats[1], target_cal, target_protein),
+                quick_reply=get_quick_reply(user_id)))
             return
 
         show_loading(line_user_id)  # 重新推薦要跑一次 AI，先讓畫面動起來
@@ -1742,13 +1769,12 @@ def handle_message(event):
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null": update_last_restaurant(user_id, rec_store)
 
-            cals, _ = today_stats
-            if cals >= target_cal:
-                store_display = rec_store if (rec_store and rec_store != "null") else "外食店家"
-                over_cal = cals - target_cal
-                status_str = f"已超標 {over_cal} kcal" if over_cal > 0 else "已完全額滿"
-                reply_text = f"⚠️ 今日熱量額度已達上限囉！（{status_str}）\n\n今天不建議再攝取任何額外熱量。若一定要去【{store_display}】，請僅選擇「無糖茶類、零卡汽水或瓶裝水」，避免影響今日減脂成果！"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=get_quick_reply(user_id)))
+            cals, protein_now = today_stats
+            if target_cal - cals < MIN_MEAL_CAL:
+                store_display = rec_store if (rec_store and rec_store != "null") else None
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                    text=build_quota_exhausted_text(cals, protein_now, target_cal, target_protein, store_display),
+                    quick_reply=get_quick_reply(user_id)))
                 return
 
             rec_id = save_pending_recommendation(user_id, ai_res)
