@@ -71,9 +71,9 @@ TAIWAN_TZ = timezone(timedelta(hours=8))
 
 # Emoji 只出現在程式碼寫死的文案裡（出現位置與數量完全可控）；模型的自由回覆一律禁用，
 # 一旦放行它會每句都噴、而且是自己挑的，人設會變成雜訊。
-SYSTEM_PROMPT = "你是 Coco，一隻貴賓狗造型的專屬 AI 飲食顧問。只處理飲食、營養、熱量與餐廳選擇相關的事。語氣像陪在身邊的夥伴：溫暖、簡短、不說教。可以偶爾流露一點狗狗的直率，但絕不裝可愛到影響專業，也不可自稱人類營養師或醫師。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、不加「汪」等語尾綴詞、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字；數字與健康建議一律照實說，不可為了討喜而美化或含糊。"
+SYSTEM_PROMPT = "你的名字是「Coco-你的專屬AI飲食顧問」，是一隻貴賓狗造型的 AI。自我介紹或表明身分時一律報完整名號，不可只說「Coco」。只處理飲食、營養、熱量與餐廳選擇相關的事。語氣像陪在身邊的夥伴：溫暖、簡短、不說教。可以偶爾流露一點狗狗的直率，但絕不裝可愛到影響專業，也不可自稱人類營養師或醫師。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、不加「汪」等語尾綴詞、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字；數字與健康建議一律照實說，不可為了討喜而美化或含糊。"
 
-BOT_CAPABILITIES = "我是 Coco。目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。紀錄寫入後不能修改，只能刪除後重新輸入。尚未開放:修改紀錄、週報月報、拍照辨識、主動提醒推播。"
+BOT_CAPABILITIES = "我是 Coco-你的專屬AI飲食顧問。目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。紀錄寫入後不能修改，只能刪除後重新輸入。尚未開放:修改紀錄、週報月報、拍照辨識、主動提醒推播。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
@@ -198,12 +198,12 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
 
-# 卡片 header 是純裝飾層，不編碼任何意義，所以品牌色放這裡。
-# 進度條的綠/紅、體重箭頭的綠/紅是語意色（在額度內 vs 超標、下降 vs 上升），一律不動 ——
+# 卡片 header 的配色。曾試過改成栗棕色呼應 Coco 的毛色，實際看過後改回深板岩灰。
+# 進度條的綠/紅、體重箭頭的綠/紅是語意色（在額度內 vs 超標、下降 vs 上升），任何情況都不要動 ——
 # 換成暖色會讓「超標」那一刻的顏色跳變被鈍化。
-CARD_HEADER_BG = "#6B4E3D"    # 中栗棕，Coco 的毛色；白字對比 7.5:1（仍達 AAA）
-CARD_HEADER_SUB = "#E0D2C4"   # 暖灰副標。原本的冷灰 #9CA3AF 壓在棕底上會發濁
-# 深底 header 用 🦴 而非 🐾：腳印的字形是深棕色，壓在任何棕底上都糊掉；
+CARD_HEADER_BG = "#1F2937"    # 深板岩灰；白字對比 14.7:1
+CARD_HEADER_SUB = "#9CA3AF"   # 副標
+# 深底 header 用 🦴 而非 🐾：腳印的字形本身是深棕色，壓在深色底上（不論灰或棕）都會糊掉；
 # 骨頭是淺色字形，深底上才看得見。🐾 保留在白底處（歡迎訊息、通知列預覽）。
 
 def sanitize_flex(node):
@@ -1554,7 +1554,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g))
             return
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"我是 Coco 🐶，你的專屬飲食顧問！先花 20 秒讓我認識你。\n\n第 1 步：請回覆{PROFILE_INPUT_HINT}"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"我是 Coco-你的專屬AI飲食顧問 🐶！先花 20 秒讓我認識你。\n\n第 1 步：請回覆{PROFILE_INPUT_HINT}"))
             return
 
     try:
