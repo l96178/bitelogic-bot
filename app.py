@@ -191,6 +191,13 @@ def _kv_row(label, value, sub=None):
 def _section_caption(text):
     return {"type": "text", "text": text, "size": "xs", "color": "#9CA3AF", "weight": "bold", "margin": "md"}
 
+def _footer_action(label, action):
+    """卡片底部的一格動作。action 掛在 box 上而非 text 上，整格都吃得到點擊。"""
+    return {
+        "type": "box", "layout": "vertical", "flex": 1, "paddingAll": "md", "action": action,
+        "contents": [{"type": "text", "text": label, "size": "xs", "color": "#3B82F6", "align": "center"}]
+    }
+
 def build_profile_flex_card(profile):
     """個人檔案卡片(含 BMR/TDEE 推導)。"""
     raw = profile.get("raw_profile_text") or ""
@@ -233,21 +240,22 @@ def build_profile_flex_card(profile):
                 _kv_row("蛋白質", f"{tp} g")
             ]
         },
-        # 原本是一行文字提示，改成按鈕：指令不用背也不用打字。
-        # Flex 按鈕會留在對話紀錄裡（quick reply 用過就消失），往回捲仍然可以點。
+        # 動作列。原本用 button 元件，三塊灰底大方塊直向堆疊佔掉卡片三分之一高度，
+        # 比上面的數據還搶眼。改成一排可點文字，跟今日卡片的「修改／刪除」同一個做法。
+        # 掛 action 的是外層 box 而不是 text：整格都可點，字小但打擊範圍不小。
         "footer": {
-            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg",
+            "type": "box", "layout": "horizontal", "paddingAll": "sm",
             "contents": [
                 # 體重要帶數字，按鈕沒辦法直接送值：openKeyboard 會打開鍵盤並預填「體重 」，
                 # 用戶只補數字，剛好命中 handle_message 的 ^體重\s*數字$ 正規式。
                 # inputOption 需 LINE 12.6.0+，舊版點了鍵盤不會開，靠 ask_weight 分支回提示當退路。
-                {"type": "button", "style": "secondary", "height": "sm", "action": {
-                    "type": "postback", "label": "更新體重", "data": urlencode({"action": "ask_weight"}),
-                    "inputOption": "openKeyboard", "fillInText": "體重 "}},
-                {"type": "button", "style": "secondary", "height": "sm", "action": {
-                    "type": "message", "label": "體重紀錄", "text": "體重紀錄"}},
-                {"type": "button", "style": "secondary", "height": "sm", "action": {
-                    "type": "message", "label": "修改檔案", "text": "修改檔案"}}
+                _footer_action("更新體重", {
+                    "type": "postback", "data": urlencode({"action": "ask_weight"}),
+                    "inputOption": "openKeyboard", "fillInText": "體重 "}),
+                {"type": "separator"},
+                _footer_action("體重紀錄", {"type": "message", "label": "體重紀錄", "text": "體重紀錄"}),
+                {"type": "separator"},
+                _footer_action("修改檔案", {"type": "message", "label": "修改檔案", "text": "修改檔案"})
             ]
         }
     }
