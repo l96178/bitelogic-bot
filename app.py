@@ -779,6 +779,10 @@ def has_correction_intent(user_msg, last_meal=None):
         return True
     if not re.search(CORRECTION_WEAK, user_msg):
         return False
+    # 「幫我把目標改成 3000」講的是每日額度而不是某一筆紀錄。
+    # 這類要求要落到 AI，由它說明總熱量是算出來的、不能指定。
+    if re.search(r'(目標|額度|上限|每日|設定|標準)', user_msg):
+        return False
     return bool(re.search(r'\d', user_msg)) or mentions_last_meal(user_msg, last_meal)
 
 # 「我只吃了10顆水餃」字面上沒有任何更正詞彙，但同樣是在改既有紀錄。
@@ -913,7 +917,16 @@ DISAMBIG_REC_SUFFIX = " — 還沒吃，給我建議"
 def is_ambiguous_eating_msg(user_msg):
     """判斷是否為「吃了/要吃」分不出來的模糊訊息(如「我午餐吃自助餐」)。
     有明確時態或明確求推薦字眼者不算模糊，不打擾用戶。"""
-    if len(user_msg) > 40 or not re.search(r'[吃喝]', user_msg):
+    # 真正分不出來的句子都很短、很單純：「我午餐吃自助餐」「中午吃麥當勞」。
+    # 排除清單是黑名單，本質上一定會漏（「我一天只能吃一餐了，熱量幫我拉到5000卡」
+    # 就漏過去了），所以先用句子的「形狀」把不像的濾掉：
+    # 太長、含數字（在談份量或目標，不是報告某一餐）一律不算模糊，交給 AI。
+    if len(user_msg) > 15 or not re.search(r'[吃喝]', user_msg):
+        return False
+    if re.search(r'\d', user_msg):
+        return False
+    # 在講作息或餐數（「我一天只能吃一餐」），不是在報告某一餐
+    if re.search(r'(一天|每天|平常|習慣|只能|沒辦法).{0,6}[吃喝]|[吃喝]\s*[一二三四五兩幾]\s*[餐頓]', user_msg):
         return False
     # 光有「吃/喝」不代表在講自己這一餐（「你去吃屎啦」也含吃）。
     # 要有第一人稱或餐別/時間詞，才可能是在報告自己的飲食;否則交給 AI 判斷，
