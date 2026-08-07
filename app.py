@@ -3,6 +3,7 @@ import re
 import json
 import time
 import traceback
+import requests  # line-bot-sdk 的相依套件，不需另外安裝
 from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
 from typing import Annotated, List, Literal, Optional, Union
@@ -211,6 +212,25 @@ def sanitize_flex(node):
         return [sanitize_flex(v) for v in node]
     return node
 
+def show_loading(line_user_id, seconds=20):
+    """在聊天室顯示「處理中」動畫，撐過 AI 呼叫那幾秒。
+
+    為什麼不用「先回一則『正在配菜』再 push 結果」：reply_token 只能用一次，
+    那樣結果就得走 Push API，而 Push 會吃掉 LINE 免費方案每月 200 則的額度，
+    Reply 則不計數。這支端點不是訊息，不計額度。
+    純體感優化，失敗不能影響主流程，所以逾時短、例外全吞。
+    v2 SDK 沒有這個方法(v3 才有 show_loading_animation)，直接打 REST。"""
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/chat/loading/start",
+            headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"chatId": line_user_id, "loadingSeconds": seconds},
+            timeout=2,
+        )
+    except Exception:
+        print("⚠️ loading 動畫顯示失敗（不影響主流程）")
+
 def flex_message(alt_text, contents, quick_reply=None):
     """所有 Flex 訊息的統一出口。集中在這裡做送出前的清理，
     新增卡片時不必再各自記得防守空字串。"""
@@ -364,8 +384,12 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
                             # 用可點的 text 而非 button：塞進列內不會把卡片撐高。
                             # 紀錄只能新增或刪除，不提供修改：更正的語意歧義修不掉，
                             # 猜錯會靜默寫壞既有資料，改用「刪掉重記」這條無歧義的路。
+                            # displayText 不能省：按下去要立刻回一顆自己的訊息泡泡。
+                            # 少了它，畫面在伺服器回覆前完全沒動靜，用戶會以為沒按到而連按
+                            # （實測連按三次，三次都只是重複跳確認）。
                             {"type": "text", "text": "刪除", "size": "xs", "color": "#EF4444", "align": "end", "flex": 0,
-                             "action": {"type": "postback", "data": urlencode({"action": "del_meal", "mid": str(m["id"])})}}
+                             "action": {"type": "postback", "displayText": "刪除這一筆",
+                                        "data": urlencode({"action": "del_meal", "mid": str(m["id"])})}}
                         ]
                     }
                 ]
@@ -974,8 +998,11 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
       嚴禁編造:若用戶只說了店名或含糊帶過(如「我吃麥當勞」「吃了便當」「午餐吃自助餐」)、沒有講出具體品項或份量，同一家店的熱量可能相差三倍以上，此時必須設 needs_detail=true(calories/protein_g 填 0 即可)，不可自行假設一個平均值。只有用戶講出具體品項(如「大麥克加中薯」)時才給數字。
       紀錄一旦寫入就不能修改，只能刪除後重記。用戶若想更正數值(如「你記少了」「其實是228大卡」)，代碼會在你之前就攔下來，你不會收到這類訊息;萬一收到，也不可把它當成新的一餐記錄。
-    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。訊息只有店名或食物類別、沒有「吃了」這類完成語氣時(如「自助餐」「麥當勞」「想吃火鍋」)，一律視為求推薦。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
-      硬性規則(份量最優先): 用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal，因此**這一餐必須吃到 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal**。給出明顯低於此區間的組合是嚴重錯誤(會害用戶下一餐被迫暴食)，寧可份量加大、加點主食或加倍肉量，也不可湊出一份 400~600 kcal 的輕食。total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
+    B.餐廳推薦/調整(type=recommendation): 設計單餐組合。
+      ★這一餐的熱量必須落在 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal，蛋白質至少 {int(meal_protein_cap*0.8)}g(目標 {meal_protein_cap}g)。這是最優先的條件，其餘規則都在這個前提下發揮。
+      ★輸出前務必自己驗算一次:把 items 每一項的 cal 加總，若總和低於 {int(meal_cal_cap*0.8)}，不可直接輸出——回頭加點主食、加大份量或多加一項，改到達標為止。
+      (依據:用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal。份量不足會害他下一餐被迫暴食，寧可加大也不可湊一份 400~600 kcal 的輕食。高蛋白優先:肉類加量/加蛋/豆腐/無糖豆漿。)
+      訊息只有店名或食物類別、沒有「吃了」這類完成語氣時(如「自助餐」「麥當勞」「想吃火鍋」)，一律視為求推薦。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
       餐盤結構(同為硬性): 組合須包含「蛋白質主食 + 蔬菜/纖維配菜」，該店有蔬菜、沙拉、湯品類就必須納入至少一項；禁止用單一品項的極端規格(如三倍肉)硬衝蛋白質——寧可蛋白質停在下限、也要保留蔬菜的熱量空間，缺口在 warning 建議店外補足。若該店確實無任何蔬菜類品項，才允許純主食組合，且 warning 須提醒本餐缺蔬菜、建議下一餐或店外補充。
       丼飯/牛丼類店家常有「增肉減飯」「肉大碗」「肉量加倍」等選項，減脂與增肌目標應優先納入這類選項。
@@ -1345,6 +1372,7 @@ def handle_postback(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⚠️ 今日熱量額度已達上限囉！（{status_str}）\n\n今天不建議再攝取任何額外熱量，明天再來看新推薦吧！", quick_reply=get_quick_reply(user_id)))
             return
 
+        show_loading(line_user_id)  # 重新推薦要跑一次 AI，先讓畫面動起來
         ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), synthetic_msg, last_restaurant=restaurant, today_meals=today_meals, menu_context=menu_context, avoid_items=prev_items, explicit_store=restaurant)
 
         if ai_res.get("type") == "recommendation":
@@ -1637,6 +1665,9 @@ def handle_message(event):
             sum(int(m.get("protein_g") or 0) for m in today_meals),
         )
 
+        # 到這裡代表前面所有正規式路徑都沒接住，一定要跑 AI（推薦最久可到 8 秒）。
+        # 擺在呼叫前一行，確保所有快速路徑都不會白白顯示動畫。
+        show_loading(line_user_id)
         ai_res = process_ai_in_single_call(raw_p_text, today_stats, (target_cal, target_protein), ai_msg, last_restaurant=last_restaurant, today_meals=today_meals, menu_context=menu_context, explicit_store=explicit_store, expected_log=expected_log, last_meal=last_meal, expected_rec=expected_rec)
         msg_type = ai_res.get("type")
 
