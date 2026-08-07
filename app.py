@@ -387,8 +387,10 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
                             # displayText 不能省：按下去要立刻回一顆自己的訊息泡泡。
                             # 少了它，畫面在伺服器回覆前完全沒動靜，用戶會以為沒按到而連按
                             # （實測連按三次，三次都只是重複跳確認）。
+                            # 帶列號 —— 泡泡出現在對話流裡，光說「這一筆」脫離卡片就沒有指涉對象。
+                            # 品名不放：推薦組合動輒四五十字會洗版，而下一則確認訊息本來就會列全名。
                             {"type": "text", "text": "刪除", "size": "xs", "color": "#EF4444", "align": "end", "flex": 0,
-                             "action": {"type": "postback", "displayText": "刪除這一筆",
+                             "action": {"type": "postback", "displayText": f"刪除第 {idx} 筆",
                                         "data": urlencode({"action": "del_meal", "mid": str(m["id"])})}}
                         ]
                     }
