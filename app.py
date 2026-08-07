@@ -195,7 +195,17 @@ def _footer_action(label, action):
     """卡片底部的一格動作。action 掛在 box 上而非 text 上，整格都吃得到點擊。"""
     return {
         "type": "box", "layout": "vertical", "flex": 1, "paddingAll": "md", "action": action,
-        "contents": [{"type": "text", "text": label, "size": "xs", "color": "#3B82F6", "align": "center"}]
+        "contents": [{"type": "text", "text": label, "size": "sm", "color": "#3B82F6", "align": "center"}]
+    }
+
+def _footer_actions(*actions):
+    """動作列，上緣帶一條分隔線把它跟卡片內容切開。"""
+    return {
+        "type": "box", "layout": "vertical", "paddingAll": "none",
+        "contents": [
+            {"type": "separator"},
+            {"type": "box", "layout": "horizontal", "paddingAll": "sm", "contents": list(actions)}
+        ]
     }
 
 def build_profile_flex_card(profile):
@@ -243,21 +253,18 @@ def build_profile_flex_card(profile):
         # 動作列。原本用 button 元件，三塊灰底大方塊直向堆疊佔掉卡片三分之一高度，
         # 比上面的數據還搶眼。改成一排可點文字，跟今日卡片的「修改／刪除」同一個做法。
         # 掛 action 的是外層 box 而不是 text：整格都可點，字小但打擊範圍不小。
-        "footer": {
-            "type": "box", "layout": "horizontal", "paddingAll": "sm",
-            "contents": [
-                # 體重要帶數字，按鈕沒辦法直接送值：openKeyboard 會打開鍵盤並預填「體重 」，
-                # 用戶只補數字，剛好命中 handle_message 的 ^體重\s*數字$ 正規式。
-                # inputOption 需 LINE 12.6.0+，舊版點了鍵盤不會開，靠 ask_weight 分支回提示當退路。
-                _footer_action("更新體重", {
-                    "type": "postback", "data": urlencode({"action": "ask_weight"}),
-                    "inputOption": "openKeyboard", "fillInText": "體重 "}),
-                {"type": "separator"},
-                _footer_action("體重紀錄", {"type": "message", "label": "體重紀錄", "text": "體重紀錄"}),
-                {"type": "separator"},
-                _footer_action("修改檔案", {"type": "message", "label": "修改檔案", "text": "修改檔案"})
-            ]
-        }
+        "footer": _footer_actions(
+            # 體重要帶數字，按鈕沒辦法直接送值：openKeyboard 會打開鍵盤並預填「體重 」，
+            # 用戶只補數字，剛好命中 handle_message 的 ^體重\s*數字$ 正規式。
+            # inputOption 需 LINE 12.6.0+，舊版點了鍵盤不會開，靠 ask_weight 分支回提示當退路。
+            _footer_action("更新體重", {
+                "type": "postback", "data": urlencode({"action": "ask_weight"}),
+                "inputOption": "openKeyboard", "fillInText": "體重 "}),
+            {"type": "separator"},
+            _footer_action("體重紀錄", {"type": "message", "label": "體重紀錄", "text": "體重紀錄"}),
+            {"type": "separator"},
+            _footer_action("修改檔案", {"type": "message", "label": "修改檔案", "text": "修改檔案"})
+        )
     }
 
 def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF4444"):
@@ -573,25 +580,94 @@ def log_weight(user_id, weight, profile):
     lines.append("\n提示:輸入「體重紀錄」可查看近期趨勢。")
     return "\n".join(lines)
 
-def get_weight_history_text(user_id, limit=8):
+def get_weight_rows(user_id, limit=8):
+    """近期體重紀錄，由舊到新。"""
     res = supabase.table("weight_logs").select("log_date, weight_kg").eq("user_id", user_id).order("log_date", desc=True).limit(limit).execute()
-    if not res.data:
-        return "尚無體重紀錄。輸入「體重 104.5」即可記錄第一筆。"
-    rows = list(reversed(res.data))
-    lines = ["近期體重紀錄:"]
-    prev_w = None
-    for r in rows:
-        w = float(r["weight_kg"])
-        mark = ""
-        if prev_w is not None:
-            d = round(w - prev_w, 1)
-            mark = f"({'↓' if d < 0 else '↑'}{abs(d)})" if d != 0 else "(→)"
-        lines.append(f"{r['log_date']}:{format_num(w)} kg {mark}")
-        prev_w = w
-    total = round(float(rows[-1]["weight_kg"]) - float(rows[0]["weight_kg"]), 1)
-    if len(rows) >= 2 and total != 0:
-        lines.append(f"\n區間變化:{'↓' if total < 0 else '↑'} {abs(total)} kg")
-    return "\n".join(lines)
+    return list(reversed(res.data)) if res.data else []
+
+def _weight_chart_block(rows):
+    """用等寬直條的高度表現體重趨勢。
+
+    Flex 沒有繪圖能力(畫不出斜線)，所以折線圖做不到;改用 filler + flex 比例
+    撐出柱高，跟 _progress_bar_block 同一個技巧。
+    刻度不從 0 起算 —— 體重差異只有幾公斤，從 0 畫會全部一樣高看不出變化;
+    改以區間上下加緩衝為刻度，並在卡片上標出範圍避免誤讀。"""
+    weights = [float(r["weight_kg"]) for r in rows]
+    lo, hi = min(weights), max(weights)
+    pad = max(0.5, (hi - lo) * 0.25)
+    lo_a, hi_a = lo - pad, hi + pad
+
+    cols, labels = [], []
+    for r, w in zip(rows, weights):
+        pct = int(round((w - lo_a) / (hi_a - lo_a) * 100))
+        pct = min(100, max(8, pct))  # 留最低高度，否則最輕的那天看不到柱子
+        cols.append({
+            "type": "box", "layout": "vertical", "contents": [
+                {"type": "filler", "flex": max(1, 100 - pct)},
+                {"type": "box", "layout": "vertical", "flex": pct, "backgroundColor": "#3B82F6",
+                 "cornerRadius": "sm", "contents": [{"type": "filler"}]}
+            ]
+        })
+        labels.append({"type": "text", "text": r["log_date"][5:].replace("-", "/"),
+                       "size": "xxs", "color": "#9CA3AF", "align": "center", "flex": 1})
+
+    return [
+        {"type": "box", "layout": "horizontal", "height": "96px", "spacing": "xs", "contents": cols},
+        {"type": "box", "layout": "horizontal", "spacing": "xs", "margin": "sm", "contents": labels},
+        {"type": "text", "text": f"縱軸範圍 {format_num(round(lo_a, 1))}～{format_num(round(hi_a, 1))} kg（非從 0 起算）",
+         "size": "xxs", "color": "#9CA3AF", "align": "center", "margin": "sm"},
+    ]
+
+def build_weight_flex_card(rows):
+    """體重趨勢卡片。rows 由舊到新，至少一筆。"""
+    weights = [float(r["weight_kg"]) for r in rows]
+    latest = weights[-1]
+    total = round(latest - weights[0], 1)
+
+    body = [
+        {"type": "text", "text": f"{format_num(latest)} kg", "size": "xxl", "weight": "bold", "color": "#1F2937"},
+        {"type": "text", "text": f"最新紀錄 {rows[-1]['log_date']}", "size": "xs", "color": "#9CA3AF", "margin": "xs"},
+    ]
+
+    if len(rows) >= 2:
+        arrow, color = ("↓", "#27AE60") if total < 0 else ("↑", "#EF4444") if total > 0 else ("→", "#6B7280")
+        body.append({"type": "text", "text": f"{arrow} 區間變化 {format_num(abs(total))} kg（共 {len(rows)} 筆）",
+                     "size": "sm", "color": color, "weight": "bold", "margin": "md"})
+        body.append({"type": "separator", "margin": "lg"})
+        body.extend(_weight_chart_block(rows))
+        body.append({"type": "separator", "margin": "lg"})
+
+        prev = None
+        for r in rows:
+            w = float(r["weight_kg"])
+            d = "" if prev is None else ("→" if round(w - prev, 1) == 0 else
+                                         f"{'↓' if w < prev else '↑'}{format_num(abs(round(w - prev, 1)))}")
+            body.append({
+                "type": "box", "layout": "horizontal", "margin": "sm", "contents": [
+                    {"type": "text", "text": r["log_date"], "size": "xs", "color": "#6B7280", "flex": 3},
+                    {"type": "text", "text": f"{format_num(w)} kg", "size": "xs", "color": "#1F2937", "align": "end", "flex": 2},
+                    {"type": "text", "text": d, "size": "xs", "color": "#9CA3AF", "align": "end", "flex": 2},
+                ]
+            })
+            prev = w
+    else:
+        body.append({"type": "text", "text": "再記錄一次就能看到趨勢圖。", "size": "sm", "color": "#6B7280", "wrap": True, "margin": "md"})
+
+    return {
+        "type": "bubble", "size": "mega",
+        "header": {
+            "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
+            "contents": [{"type": "text", "text": "體重趨勢", "weight": "bold", "color": "#FFFFFF", "size": "md"}]
+        },
+        "body": {"type": "box", "layout": "vertical", "paddingAll": "lg", "contents": body},
+        "footer": _footer_actions(
+            _footer_action("更新體重", {
+                "type": "postback", "data": urlencode({"action": "ask_weight"}),
+                "inputOption": "openKeyboard", "fillInText": "體重 "}),
+            {"type": "separator"},
+            _footer_action("個人檔案", {"type": "message", "label": "個人檔案", "text": "個人檔案"})
+        )
+    }
 
 VAGUE_FOOD_WORDS = ["飲食紀錄", "餐點", "未知", "一餐", "套餐組合", "外食", "正餐"]
 MEAL_WORDS = ["便當", "早餐", "午餐", "晚餐", "宵夜", "點心", "自助餐", "小吃", "火鍋", "麵", "飯"]
@@ -1588,7 +1664,11 @@ def handle_message(event):
 
         # 體重指令:查詢趨勢
         if user_msg in ["體重紀錄", "體重記錄", "體重趨勢"]:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=get_weight_history_text(user_id), quick_reply=get_quick_reply(user_id)))
+            w_rows = get_weight_rows(user_id)
+            if not w_rows:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚無體重紀錄。", quick_reply=get_quick_reply(user_id)))
+            else:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"體重趨勢（{len(w_rows)} 筆）", contents=build_weight_flex_card(w_rows), quick_reply=get_quick_reply(user_id)))
             return
 
         # 體重指令:記錄(限定「體重 104.5」這類完整格式,避免誤吞一般對話)
