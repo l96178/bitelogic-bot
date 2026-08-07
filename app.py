@@ -175,6 +175,27 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
 
+def sanitize_flex(node):
+    """把 Flex 樹裡空字串的 text 換成「—」。
+
+    LINE 規定 text 元件必須非空，違反時整則訊息被擋成 400，用戶什麼都收不到
+    （連錯誤訊息都送不出去，因為 reply token 已經廢了）。空值多半來自模型產出的
+    欄位(title/warning…)或缺資料的欄位，逐處防守容易漏，統一在送出前掃一遍。
+    命中時印 log，才不會把真正的問題藏起來。"""
+    if isinstance(node, dict):
+        if node.get("type") == "text" and not str(node.get("text") or "").strip():
+            print(f"⚠️ Flex 出現空字串 text，已代換：{node}")
+            node = {**node, "text": "—"}
+        return {k: sanitize_flex(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [sanitize_flex(v) for v in node]
+    return node
+
+def flex_message(alt_text, contents, quick_reply=None):
+    """所有 Flex 訊息的統一出口。集中在這裡做送出前的清理，
+    新增卡片時不必再各自記得防守空字串。"""
+    return FlexSendMessage(alt_text=alt_text, contents=sanitize_flex(contents), quick_reply=quick_reply)
+
 def _kv_row(label, value, sub=None):
     """卡片內的「標籤:值」橫列。sub 為值下方的小字補充(避免長字串在右欄折行)。"""
     right = [{"type": "text", "text": str(value), "size": "sm", "weight": "bold", "color": "#1F2937", "align": "end", "wrap": True}]
@@ -640,8 +661,10 @@ def build_weight_flex_card(rows):
         prev = None
         for r in rows:
             w = float(r["weight_kg"])
-            d = "" if prev is None else ("→" if round(w - prev, 1) == 0 else
-                                         f"{'↓' if w < prev else '↑'}{format_num(abs(round(w - prev, 1)))}")
+            # 第一列沒有前一筆可比。這裡不能給空字串 —— Flex 的 text 必須非空，
+            # 送出去會被 LINE 擋成 400，整則訊息都發不出去。
+            d = "—" if prev is None else ("→" if round(w - prev, 1) == 0 else
+                                          f"{'↓' if w < prev else '↑'}{format_num(abs(round(w - prev, 1)))}")
             body.append({
                 "type": "box", "layout": "horizontal", "margin": "sm", "contents": [
                     {"type": "text", "text": r["log_date"], "size": "xs", "color": "#6B7280", "flex": 3},
@@ -1325,7 +1348,7 @@ def handle_postback(event):
 
         meals_now = get_today_meals_list(profile["id"])
         summary_flex = build_today_card(meals_now, cals=total_c, protein=total_p, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
-        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
+        line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "reroll":
         rec_id = data.get("rec_id", [""])[0]
@@ -1366,7 +1389,7 @@ def handle_postback(event):
         if ai_res.get("type") == "recommendation":
             new_rec_id = save_pending_recommendation(user_id, ai_res)
             flex_content = build_flex_card(ai_res, new_rec_id)
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 新推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 新推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "重新推薦失敗，請再試一次。", quick_reply=get_quick_reply(user_id)))
 
@@ -1412,7 +1435,7 @@ def handle_postback(event):
         summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
         line_bot_api.reply_message(event.reply_token, [
             TextSendMessage(text=f"已刪除：\n{deleted['food_name']}\n-{deleted['calories']} kcal"),
-            FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+            flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
         ])
 
     elif action == "ask_edit":
@@ -1453,7 +1476,7 @@ def handle_postback(event):
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
         summary_flex = build_today_card(meals, cals=cals, protein=protein_total, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
                                         last_logged_info={"food": food, "cal": cal, "protein": protein}, info_label=info_label)
-        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
+        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
 
     elif action == "portion_fix":
         profile = get_user_profile(line_user_id)
@@ -1487,7 +1510,7 @@ def handle_postback(event):
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
         summary_flex = build_today_card(meals, cals=cals, protein=protein_total, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
                                         last_logged_info={"food": food, "cal": cal, "protein": protein}, info_label="已更正最近一筆紀錄")
-        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
+        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
 
     elif action in ("corr_confirm", "corr_cancel"):
         profile = get_user_profile(line_user_id)
@@ -1507,7 +1530,7 @@ def handle_postback(event):
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
             line_bot_api.reply_message(event.reply_token, [
                 TextSendMessage(text="已取消，資料沒有變動。\n\n你也可以直接在下面卡片上點該筆的「修改」，指定要改哪一筆、改成多少。"),
-                FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+                flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
             ])
             return
 
@@ -1528,7 +1551,7 @@ def handle_postback(event):
         summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
                                         last_logged_info={"food": corrected["food_name"], "cal": corrected["calories"], "protein": corrected["protein_g"]},
                                         info_label="已更正最近一筆紀錄")
-        line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
+        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
 
     elif action == "ask_weight":
         # openKeyboard 已經幫用戶預填好「體重 」了，這則回覆是給不支援 inputOption
@@ -1603,7 +1626,7 @@ def handle_postback(event):
                         "下方按鈕只是捷徑，不限這幾家。")
         if new_profile:
             line_bot_api.reply_message(event.reply_token, [
-                FlexSendMessage(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile)),
+                flex_message(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile)),
                 TextSendMessage(text=welcome_text, quick_reply=get_quick_reply(new_profile["id"]))
             ])
         else:
@@ -1659,7 +1682,7 @@ def handle_message(event):
 
         # 個人檔案指令:顯示完整檔案卡片(含 BMR/TDEE 推導)
         if user_msg in ["個人檔案", "我的檔案", "查看檔案", "查看個人檔案"]:
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="我的健康檔案", contents=build_profile_flex_card(profile), quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text="我的健康檔案", contents=build_profile_flex_card(profile), quick_reply=get_quick_reply(user_id)))
             return
 
         # 體重指令:查詢趨勢
@@ -1668,7 +1691,7 @@ def handle_message(event):
             if not w_rows:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚無體重紀錄。", quick_reply=get_quick_reply(user_id)))
             else:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"體重趨勢（{len(w_rows)} 筆）", contents=build_weight_flex_card(w_rows), quick_reply=get_quick_reply(user_id)))
+                line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"體重趨勢（{len(w_rows)} 筆）", contents=build_weight_flex_card(w_rows), quick_reply=get_quick_reply(user_id)))
             return
 
         # 體重指令:記錄(限定「體重 104.5」這類完整格式,避免誤吞一般對話)
@@ -1691,7 +1714,7 @@ def handle_message(event):
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             today_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
         if re.search(r'(刪除|刪掉|移除|撤銷|取消).{0,6}(上一筆|最後一筆|最近一筆|這一筆|這筆|紀錄|記錄)', user_msg) or user_msg in ["刪除上一筆", "刪除紀錄"]:
@@ -1702,7 +1725,7 @@ def handle_message(event):
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
+            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
         # 「第 2 筆改成 500 大卡」:卡片「修改」鈕預填的句型,純正規式、不經過 LLM。
@@ -1719,7 +1742,7 @@ def handle_message(event):
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=edit_msg), FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
+            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=edit_msg), flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
         last_restaurant = get_last_restaurant(profile)
@@ -1897,7 +1920,7 @@ def handle_message(event):
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
             meals_now = get_today_meals_list(user_id)
             summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null": update_last_restaurant(user_id, rec_store)
@@ -1913,7 +1936,7 @@ def handle_message(event):
 
             rec_id = save_pending_recommendation(user_id, ai_res)
             flex_content = build_flex_card(ai_res, rec_id)
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集", quick_reply=get_quick_reply(user_id)))
 
