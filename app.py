@@ -1,11 +1,12 @@
 import os
 import re
 import json
+import time
 import traceback
 from urllib.parse import parse_qs, urlencode
 from datetime import datetime, timezone, timedelta
 from typing import Annotated, List, Literal, Optional, Union
-from flask import Flask, request, abort
+from flask import Flask, request, abort, g
 from pydantic import BaseModel, Field, TypeAdapter
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -524,19 +525,34 @@ def build_goal_quick_reply(h, w, a, g):
         QuickReplyButton(action=PostbackAction(label="增肌減脂", data=urlencode({"action": "step_goal", "h": h, "w": w, "a": a, "g": g, "goal": "增肌減脂"}), display_text="增肌減脂"))
     ])
 
+def today_log_id(user_id):
+    """今天的 daily_logs id（沒有就回 None）。
+
+    同一個 request 內會被問三四次(列出紀錄、查最後一筆、寫入…)，每次都打一趟
+    資料庫太浪費。快取在 flask.g 上 —— 它隨 request 結束自動清空，不會跨請求汙染，
+    也不會在多 worker 部署下出問題。"""
+    cache = getattr(g, "_log_ids", None)
+    if cache is None:
+        cache = g._log_ids = {}
+    key = (user_id, get_today_str())
+    if key not in cache:
+        res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", get_today_str()).execute()
+        cache[key] = res.data[0]["id"] if res.data else None
+    return cache[key]
+
 def get_or_create_daily_log_id(user_id):
-    today = get_today_str()
-    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
-    if log_res.data:
-        return log_res.data[0]["id"]
-    new_log = supabase.table("daily_logs").insert({"user_id": user_id, "log_date": today}).execute()
-    return new_log.data[0]["id"]
+    log_id = today_log_id(user_id)
+    if log_id:
+        return log_id
+    new_log = supabase.table("daily_logs").insert({"user_id": user_id, "log_date": get_today_str()}).execute()
+    log_id = new_log.data[0]["id"]
+    g._log_ids[(user_id, get_today_str())] = log_id  # 剛建好，別讓快取還停在 None
+    return log_id
 
 def get_today_meals_list(user_id):
-    today = get_today_str()
-    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
-    if not log_res.data: return []
-    meals_res = supabase.table("meal_items").select("id, food_name, calories, protein_g").eq("daily_log_id", log_res.data[0]["id"]).order("created_at", desc=False).execute()
+    log_id = today_log_id(user_id)
+    if not log_id: return []
+    meals_res = supabase.table("meal_items").select("id, food_name, calories, protein_g").eq("daily_log_id", log_id).order("created_at", desc=False).execute()
     return meals_res.data if meals_res.data else []
 
 def get_today_summary(user_id):
@@ -749,9 +765,23 @@ def extract_delta_entry(ai_res, last_meal):
         "protein_g": max(0, d_pro),
     }
 
+# 「刪除上一筆」帶明確受詞;「幫我刪除」沒有受詞，正規式接不到就會落到模型手上，
+# 而模型會謊稱「已幫您刪除」卻什麼都沒做(實測踩過)。短句裡出現刪除動詞幾乎不會有別的意思，
+# 所以補上無受詞的形式。「取消」不列入無受詞版 —— 它可能是在取消別的流程。
+DELETE_INTENT_RE = re.compile(
+    r'(刪除|刪掉|移除|撤銷|取消).{0,6}(上一筆|最後一筆|最近一筆|這一筆|這筆|紀錄|記錄)'
+    r'|^\s*(幫我|請|麻煩)?\s*(刪除|刪掉|移除|撤銷)\s*(一下|一筆|吧|啦)?\s*$')
+
 def is_vague_log(ai_res):
     """判斷這筆紀錄是否資訊不足(只有店名/含糊描述)。AI 未主動標記時的代碼防線。"""
     if ai_res.get("needs_detail"):
+        return True
+    # 講了具體品項卻估出 0 kcal，代表模型沒有數據、或誤判成「跟上一筆重複所以不算」。
+    # 這種紀錄寫進去沒有意義，還會讓當日總量少算 —— 一律當成資訊不足去追問。
+    try:
+        if int(float(ai_res.get("calories") or 0)) <= 0:
+            return True
+    except (TypeError, ValueError):
         return True
     name = re.sub(r'^【.*?】', '', (ai_res.get("food_name") or "")).strip()
     if not name:
@@ -781,11 +811,10 @@ def build_ask_detail_reply(ai_res, user_id):
 
 def get_last_meal_brief(user_id):
     """取回今日最後一筆紀錄的摘要(含距今幾分鐘),供 AI 判斷用戶是否在補述同一餐。"""
-    today = get_today_str()
-    log_res = supabase.table("daily_logs").select("id").eq("user_id", user_id).eq("log_date", today).execute()
-    if not log_res.data:
+    log_id = today_log_id(user_id)
+    if not log_id:
         return None
-    res = supabase.table("meal_items").select("food_name, calories, protein_g, created_at").eq("daily_log_id", log_res.data[0]["id"]).order("created_at", desc=True).limit(1).execute()
+    res = supabase.table("meal_items").select("food_name, calories, protein_g, created_at").eq("daily_log_id", log_id).order("created_at", desc=True).limit(1).execute()
     if not res.data:
         return None
     m = res.data[0]
@@ -896,6 +925,8 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
             f"    用戶接下來若回報「又吃了別的東西」(如「吃了兩個甜甜圈」「又喝了一杯豆漿」)，這是**新的一筆**:"
             f"food_name 只寫這次新吃的東西，calories/protein_g 只算這次新吃的量。"
             f"絕對不可把上一筆的品項重複寫進來，那會導致重複計算。\n"
+            f"    但若用戶這次描述的東西跟上一筆幾乎相同(常見於刪掉後重新輸入)，那仍是獨立的一筆，"
+            f"必須照常給出完整的熱量與蛋白質。絕不可因為「看起來重複」就填 0。\n"
         )
 
     prompt = f"""
@@ -1163,12 +1194,17 @@ def get_today_meal_by_id(user_id, meal_id):
     return next((m for m in get_today_meals_list(user_id) if str(m["id"]) == str(meal_id)), None)
 
 def delete_meal_by_id(user_id, meal_id):
-    """刪除今日指定的一筆紀錄，回傳被刪掉的那筆；找不到(已刪或不屬於本人)時回 None。"""
-    target = get_today_meal_by_id(user_id, meal_id)
+    """刪除今日指定的一筆紀錄。
+
+    回傳 (被刪掉的那筆, 刪除後剩下的清單)；找不到(已刪或不屬於本人)時回 (None, 現有清單)。
+    連剩餘清單一起回傳是刻意的:呼叫端接著一定要重畫卡片，而清單這裡本來就已經在手上，
+    讓它自己再撈一次等於白跑兩趟查詢。"""
+    meals = get_today_meals_list(user_id)
+    target = next((m for m in meals if str(m["id"]) == str(meal_id)), None)
     if not target:
-        return None
+        return None, meals
     supabase.table("meal_items").delete().eq("id", target["id"]).execute()
-    return target
+    return target, [m for m in meals if m["id"] != target["id"]]
 
 def log_meal_to_supabase(user_id, intent_data):
     cals = int(round(float(intent_data.get("calories") or 0)))
@@ -1189,8 +1225,14 @@ def health_check(): return 'BiteLogic API is running', 200
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    try: handler.handle(body, signature)
-    except InvalidSignatureError: abort(400)
+    started = time.monotonic()
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    finally:
+        # 用來分辨「查詢太多」和「Render 冷啟動」：後者會是數十秒，前者頂多幾秒。
+        print(f"⏱ webhook 處理耗時 {time.monotonic() - started:.2f}s")
     return 'OK'
 
 @handler.add(PostbackEvent)
@@ -1304,12 +1346,11 @@ def handle_postback(event):
             return
 
         # 第二段：真的刪。同一張卡片按兩次時第二次會落在這裡並找不到目標。
-        deleted = delete_meal_by_id(user_id, mid)
+        deleted, meals = delete_meal_by_id(user_id, mid)
         if not deleted:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這筆紀錄已經不在了。", quick_reply=get_quick_reply(user_id)))
             return
 
-        meals = get_today_meals_list(user_id)
         cals, protein = (
             sum(int(m.get("calories") or 0) for m in meals),
             sum(int(m.get("protein_g") or 0) for m in meals),
@@ -1485,7 +1526,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
-        if re.search(r'(刪除|刪掉|移除|撤銷|取消).{0,6}(上一筆|最後一筆|最近一筆|這一筆|這筆|紀錄|記錄)', user_msg) or user_msg in ["刪除上一筆", "刪除紀錄"]:
+        if DELETE_INTENT_RE.search(user_msg) or user_msg in ["刪除上一筆", "刪除紀錄"]:
             del_msg = delete_last_meal(user_id)
             meals = get_today_meals_list(user_id)
             cals, protein = (
