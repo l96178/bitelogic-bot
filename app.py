@@ -201,8 +201,10 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
 # 卡片 header 是純裝飾層，不編碼任何意義，所以品牌色放這裡。
 # 進度條的綠/紅、體重箭頭的綠/紅是語意色（在額度內 vs 超標、下降 vs 上升），一律不動 ——
 # 換成暖色會讓「超標」那一刻的顏色跳變被鈍化。
-CARD_HEADER_BG = "#3E2C23"    # 深栗棕，Coco 的毛色；白字對比 13.2:1，與原本的深板岩灰相當
-CARD_HEADER_SUB = "#C4B5A5"   # 暖灰副標。原本的冷灰 #9CA3AF 壓在棕底上會發濁
+CARD_HEADER_BG = "#6B4E3D"    # 中栗棕，Coco 的毛色；白字對比 7.5:1（仍達 AAA）
+CARD_HEADER_SUB = "#E0D2C4"   # 暖灰副標。原本的冷灰 #9CA3AF 壓在棕底上會發濁
+# 深底 header 用 🦴 而非 🐾：腳印的字形是深棕色，壓在任何棕底上都糊掉；
+# 骨頭是淺色字形，深底上才看得見。🐾 保留在白底處（歡迎訊息、通知列預覽）。
 
 def sanitize_flex(node):
     """把 Flex 樹裡空字串的 text 換成「—」。
@@ -297,7 +299,7 @@ def build_profile_flex_card(profile):
         "header": {
             "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
             "contents": [
-                {"type": "text", "text": "🐾 我的健康檔案", "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": "🦴 我的健康檔案", "weight": "bold", "color": "#FFFFFF", "size": "md"},
                 {"type": "text", "text": f"目標模式：{goal_disp}", "color": CARD_HEADER_SUB, "size": "xs", "margin": "xs"}
             ]
         },
@@ -359,7 +361,7 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
     """統一的「今日」卡片:今日進度查詢、飲食明細、紀錄成功、更正、刪除後全部共用。
     含逐筆清單 + 進度條;last_logged_info 存在時頂部顯示綠色成功框。"""
     goal_disp = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
-    header_title = "🐾 紀錄成功與今日進度" if last_logged_info else "🐾 今日進度總覽"
+    header_title = "🦴 紀錄成功與今日進度" if last_logged_info else "🦴 今日進度總覽"
 
     body_contents = []
 
@@ -747,7 +749,7 @@ def build_weight_flex_card(rows):
         "type": "bubble", "size": "mega",
         "header": {
             "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
-            "contents": [{"type": "text", "text": "🐾 體重趨勢", "weight": "bold", "color": "#FFFFFF", "size": "md"}]
+            "contents": [{"type": "text", "text": "🦴 體重趨勢", "weight": "bold", "color": "#FFFFFF", "size": "md"}]
         },
         "body": {"type": "box", "layout": "vertical", "paddingAll": "lg", "contents": body},
         "footer": _footer_actions(
