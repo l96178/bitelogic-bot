@@ -32,6 +32,40 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = genai.Client(api_key=GEMINI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
+class _TimedQuery:
+    """透明代理 supabase 的查詢建構器，只為了計時 —— 其餘方法原樣轉發，
+    所以二十幾個呼叫點一行都不用改。execute() 會把耗時累加到當次 request。"""
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name):
+        attr = getattr(object.__getattribute__(self, "_inner"), name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            if name == "execute":
+                started = time.monotonic()
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    try:
+                        g._db = (getattr(g, "_db", (0, 0.0))[0] + 1,
+                                 getattr(g, "_db", (0, 0.0))[1] + time.monotonic() - started)
+                    except RuntimeError:
+                        pass  # 不在 request context 內(如啟動期)就不記
+            return _TimedQuery(attr(*args, **kwargs))
+
+        return call
+
+
+# 只包 table()，代理面積最小；查詢鏈上的其他方法由 _TimedQuery 自動接手。
+_untimed_table = supabase.table
+supabase.table = lambda name: _TimedQuery(_untimed_table(name))
+
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 SYSTEM_PROMPT = "你是 BiteLogic 外食營養師，只處理飲食、營養、熱量與餐廳選擇相關的事。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
@@ -1231,8 +1265,10 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     finally:
-        # 用來分辨「查詢太多」和「Render 冷啟動」：後者會是數十秒，前者頂多幾秒。
-        print(f"⏱ webhook 處理耗時 {time.monotonic() - started:.2f}s")
+        # 拆出 DB 佔比：總時間扣掉 DB 若還很大，瓶頸就在 AI 呼叫或 LINE API，不在查詢數量。
+        total = time.monotonic() - started
+        n, db_secs = getattr(g, "_db", (0, 0.0))
+        print(f"⏱ webhook {total:.2f}s ｜ DB {n} 次 {db_secs:.2f}s ｜ 其餘 {total - db_secs:.2f}s")
     return 'OK'
 
 @handler.add(PostbackEvent)
