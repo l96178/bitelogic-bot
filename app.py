@@ -69,9 +69,11 @@ supabase.table = lambda name: _TimedQuery(_untimed_table(name))
 
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
-SYSTEM_PROMPT = "你是 BiteLogic 外食營養師，只處理飲食、營養、熱量與餐廳選擇相關的事。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
+# Emoji 只出現在程式碼寫死的文案裡（出現位置與數量完全可控）；模型的自由回覆一律禁用，
+# 一旦放行它會每句都噴、而且是自己挑的，人設會變成雜訊。
+SYSTEM_PROMPT = "你是 Coco，一隻貴賓狗造型的專屬 AI 飲食顧問。只處理飲食、營養、熱量與餐廳選擇相關的事。語氣像陪在身邊的夥伴：溫暖、簡短、不說教。可以偶爾流露一點狗狗的直率，但絕不裝可愛到影響專業，也不可自稱人類營養師或醫師。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、不加「汪」等語尾綴詞、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字；數字與健康建議一律照實說，不可為了討喜而美化或含糊。"
 
-BOT_CAPABILITIES = "目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。紀錄寫入後不能修改，只能刪除後重新輸入。尚未開放:修改紀錄、週報月報、拍照辨識、主動提醒推播。"
+BOT_CAPABILITIES = "我是 Coco。目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。紀錄寫入後不能修改，只能刪除後重新輸入。尚未開放:修改紀錄、週報月報、拍照辨識、主動提醒推播。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
@@ -196,6 +198,12 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
 
+# 卡片 header 是純裝飾層，不編碼任何意義，所以品牌色放這裡。
+# 進度條的綠/紅、體重箭頭的綠/紅是語意色（在額度內 vs 超標、下降 vs 上升），一律不動 ——
+# 換成暖色會讓「超標」那一刻的顏色跳變被鈍化。
+CARD_HEADER_BG = "#3E2C23"    # 深栗棕，Coco 的毛色；白字對比 13.2:1，與原本的深板岩灰相當
+CARD_HEADER_SUB = "#C4B5A5"   # 暖灰副標。原本的冷灰 #9CA3AF 壓在棕底上會發濁
+
 def sanitize_flex(node):
     """把 Flex 樹裡空字串的 text 換成「—」。
 
@@ -287,10 +295,10 @@ def build_profile_flex_card(profile):
     return {
         "type": "bubble", "size": "mega",
         "header": {
-            "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
+            "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
             "contents": [
-                {"type": "text", "text": "我的健康檔案", "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"目標模式：{goal_disp}", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+                {"type": "text", "text": "🐾 我的健康檔案", "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": f"目標模式：{goal_disp}", "color": CARD_HEADER_SUB, "size": "xs", "margin": "xs"}
             ]
         },
         "body": {
@@ -351,7 +359,7 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
     """統一的「今日」卡片:今日進度查詢、飲食明細、紀錄成功、更正、刪除後全部共用。
     含逐筆清單 + 進度條;last_logged_info 存在時頂部顯示綠色成功框。"""
     goal_disp = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
-    header_title = "紀錄成功與今日進度" if last_logged_info else "今日進度總覽"
+    header_title = "🐾 紀錄成功與今日進度" if last_logged_info else "🐾 今日進度總覽"
 
     body_contents = []
 
@@ -413,10 +421,10 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
     card = {
         "type": "bubble", "size": "mega",
         "header": {
-            "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
+            "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
             "contents": [
                 {"type": "text", "text": header_title, "weight": "bold", "color": "#FFFFFF", "size": "md"},
-                {"type": "text", "text": f"{get_today_str()} ｜ {goal_disp} ｜ 共 {len(meals)} 筆", "color": "#9CA3AF", "size": "xs", "margin": "xs"}
+                {"type": "text", "text": f"{get_today_str()} ｜ {goal_disp} ｜ 共 {len(meals)} 筆", "color": CARD_HEADER_SUB, "size": "xs", "margin": "xs"}
             ]
         },
         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": body_contents}
@@ -738,8 +746,8 @@ def build_weight_flex_card(rows):
     return {
         "type": "bubble", "size": "mega",
         "header": {
-            "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
-            "contents": [{"type": "text", "text": "體重趨勢", "weight": "bold", "color": "#FFFFFF", "size": "md"}]
+            "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
+            "contents": [{"type": "text", "text": "🐾 體重趨勢", "weight": "bold", "color": "#FFFFFF", "size": "md"}]
         },
         "body": {"type": "box", "layout": "vertical", "paddingAll": "lg", "contents": body},
         "footer": _footer_actions(
@@ -864,7 +872,7 @@ def build_ask_detail_reply(ai_res, user_id):
         items.insert(0, QuickReplyButton(action=MessageAction(label=f"{restaurant}推薦", text=f"{restaurant}推薦")))
     return TextSendMessage(
         text=(f"想幫你記錄{store_txt}，但同一家店不同餐點熱量可能差三倍以上，"
-              f"我不想猜錯數字。\n\n可以告訴我你吃了哪些嗎？例如：「大麥克、中薯、無糖紅茶」。\n\n"
+              f"我不想亂猜害你算錯。\n\n可以告訴我你吃了哪些嗎？例如：「大麥克、中薯、無糖紅茶」。\n\n"
               f"若還沒點餐，也可以先看看推薦怎麼點。"),
         quick_reply=QuickReply(items=items)
     )
@@ -1338,7 +1346,7 @@ def handle_postback(event):
 
         meals_now = get_today_meals_list(profile["id"])
         summary_flex = build_today_card(meals_now, cals=total_c, protein=total_p, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
-        line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
+        line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "reroll":
         rec_id = data.get("rec_id", [""])[0]
@@ -1380,7 +1388,7 @@ def handle_postback(event):
         if ai_res.get("type") == "recommendation":
             new_rec_id = save_pending_recommendation(user_id, ai_res)
             flex_content = build_flex_card(ai_res, new_rec_id)
-            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 新推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 新推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "重新推薦失敗，請再試一次。", quick_reply=get_quick_reply(user_id)))
 
@@ -1425,7 +1433,7 @@ def handle_postback(event):
         summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
         line_bot_api.reply_message(event.reply_token, [
             TextSendMessage(text=f"已刪除：\n{deleted['food_name']}\n-{deleted['calories']} kcal"),
-            flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+            flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
         ])
 
     elif action == "ask_weight":
@@ -1496,12 +1504,12 @@ def handle_postback(event):
         # 用戶滑到底只看到 quick reply 的超商按鈕，誤以為只能選那幾家（實測回饋）。
         # quick reply 只會顯示在回覆陣列的最後一則訊息上，所以它必須跟著提示一起搬到末尾。
         # 範例刻意避開超商，否則只是加強「這是超商專用工具」的印象。
-        welcome_text = ("【建檔成功】\n\n"
-                        "想吃什麼直接輸入店名就好，例如：麥當勞、八方雲集、鬍鬚張。\n"
+        welcome_text = ("【檔案建好了】🐾\n\n"
+                        "以後想吃什麼直接跟我說店名就好，例如：麥當勞、八方雲集、鬍鬚張。\n"
                         "下方按鈕只是捷徑，不限這幾家。")
         if new_profile:
             line_bot_api.reply_message(event.reply_token, [
-                flex_message(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile)),
+                flex_message(alt_text="🐾 我的健康檔案", contents=build_profile_flex_card(new_profile)),
                 TextSendMessage(text=welcome_text, quick_reply=get_quick_reply(new_profile["id"]))
             ])
         else:
@@ -1544,7 +1552,7 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g))
             return
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"歡迎來到 BiteLogic！先花 20 秒建立健康檔案。\n\n第 1 步：請回覆{PROFILE_INPUT_HINT}"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"我是 Coco 🐶，你的專屬飲食顧問！先花 20 秒讓我認識你。\n\n第 1 步：請回覆{PROFILE_INPUT_HINT}"))
             return
 
     try:
@@ -1557,7 +1565,7 @@ def handle_message(event):
 
         # 個人檔案指令:顯示完整檔案卡片(含 BMR/TDEE 推導)
         if user_msg in ["個人檔案", "我的檔案", "查看檔案", "查看個人檔案"]:
-            line_bot_api.reply_message(event.reply_token, flex_message(alt_text="我的健康檔案", contents=build_profile_flex_card(profile), quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text="🐾 我的健康檔案", contents=build_profile_flex_card(profile), quick_reply=get_quick_reply(user_id)))
             return
 
         # 體重指令:查詢趨勢
@@ -1566,7 +1574,7 @@ def handle_message(event):
             if not w_rows:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="尚無體重紀錄。", quick_reply=get_quick_reply(user_id)))
             else:
-                line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"體重趨勢（{len(w_rows)} 筆）", contents=build_weight_flex_card(w_rows), quick_reply=get_quick_reply(user_id)))
+                line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 體重趨勢（{len(w_rows)} 筆）", contents=build_weight_flex_card(w_rows), quick_reply=get_quick_reply(user_id)))
             return
 
         # 體重指令:記錄(限定「體重 104.5」這類完整格式,避免誤吞一般對話)
@@ -1589,7 +1597,7 @@ def handle_message(event):
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             today_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
         if DELETE_INTENT_RE.search(user_msg) or user_msg in ["刪除上一筆", "刪除紀錄"]:
@@ -1600,7 +1608,7 @@ def handle_message(event):
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
+            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
         # 更正語氣攔截。紀錄只能新增或刪除，不支援修改。
@@ -1618,7 +1626,7 @@ def handle_message(event):
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
             line_bot_api.reply_message(event.reply_token, [
                 TextSendMessage(text="紀錄沒辦法修改。\n\n請在下面卡片上刪除那一筆，再重新輸入一次。"),
-                flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+                flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
             ])
             return
 
@@ -1703,7 +1711,7 @@ def handle_message(event):
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
             meals_now = get_today_meals_list(user_id)
             summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
-            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")
             if rec_store and rec_store != "null": update_last_restaurant(user_id, rec_store)
@@ -1719,7 +1727,7 @@ def handle_message(event):
 
             rec_id = save_pending_recommendation(user_id, ai_res)
             flex_content = build_flex_card(ai_res, rec_id)
-            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"BiteLogic 推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
+            line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 推薦：{ai_res.get('restaurant', '')}口袋菜單", contents=flex_content, quick_reply=get_quick_reply(user_id)))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "請輸入想吃的餐廳名稱，例如：麥當勞、7-11、八方雲集", quick_reply=get_quick_reply(user_id)))
 
