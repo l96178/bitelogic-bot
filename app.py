@@ -35,7 +35,7 @@ TAIWAN_TZ = timezone(timedelta(hours=8))
 
 SYSTEM_PROMPT = "你是 BiteLogic 外食營養師，只處理飲食、營養、熱量與餐廳選擇相關的事。除了熱量與蛋白質達標，也重視餐盤均衡（蔬菜纖維、避免單一食物疊加）。純文字回答、無粗體、無Emoji、控在 100 字內。不提價格。若提剩餘額度必須完全照抄給定的正確數字。"
 
-BOT_CAPABILITIES = "目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、更正或刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。尚未開放:週報月報、拍照辨識、主動提醒推播。"
+BOT_CAPABILITIES = "目前具備的功能:餐廳口袋菜單推薦、飲食紀錄、刪除今日任何一筆紀錄、查詢今日進度與明細、個人檔案、體重紀錄。紀錄寫入後不能修改，只能刪除後重新輸入。尚未開放:修改紀錄、週報月報、拍照辨識、主動提醒推播。"
 
 GOAL_MAP_TO_DB = {"減脂": "fat_loss", "增肌": "muscle_gain", "增肌減脂": "recomp"}
 GOAL_MAP_TO_DISP = {"fat_loss": "減脂", "muscle_gain": "增肌", "recomp": "增肌減脂"}
@@ -54,7 +54,6 @@ class LogResult(BaseModel):
     food_name: str
     calories: float
     protein_g: float
-    is_correction: Optional[bool] = Field(default=None, description="用戶在更正上一筆紀錄的數值時為 true，此時 calories/protein_g 填更正後的完整正確值(不是差額)")
     needs_detail: Optional[bool] = Field(default=None, description="用戶只講了店名或含糊帶過(如「我吃麥當勞」「吃了便當」)、沒有具體品項時為 true。此時嚴禁編造熱量數字")
 
 class RecommendationResult(BaseModel):
@@ -75,20 +74,6 @@ class ChatResult(BaseModel):
 AIResultAdapter = TypeAdapter(
     Annotated[Union[LogResult, RecommendationResult, ChatResult], Field(discriminator="type")]
 )
-
-class PortionCut(BaseModel):
-    """份量修正:「我只吃了10顆水餃」對一筆多品項紀錄要扣掉多少。
-    刻意只問「扣多少」而非「更正後總量」——問總量等於要模型從零重算整筆，
-    它會把用戶沒提到的配菜(燙青菜、豆漿)一起蒸發掉。實測踩過。"""
-    item: str = Field(description="份量被更動的那一個品項名稱，例如「招牌水餃」")
-    from_amount: str = Field(description="該品項原本的份量，含單位，例如「14 顆」。原紀錄沒寫份量時填空字串")
-    to_amount: str = Field(description="該品項更動後的份量，含單位，例如「10 顆」")
-    unchanged: str = Field(description="這筆裡沒被更動、視為照吃完的其他品項，以「、」分隔。沒有其他品項時填空字串")
-    cut_calories: int = Field(description="要從整筆總熱量扣掉的大卡數(正數)。判斷不出來時填 0")
-    cut_protein_g: int = Field(description="要從整筆總蛋白質扣掉的公克數(正數)。判斷不出來時填 0")
-    new_name: str = Field(description="更動後的完整品項描述，未被提到的品項必須原樣保留")
-
-PortionCutAdapter = TypeAdapter(PortionCut)
 
 def normalize_ai_result(d):
     """容錯層：模型偶爾會搞混欄位名(如 log 意圖誤用 total_cal/total_protein)。
@@ -339,13 +324,11 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
                         "type": "box", "layout": "horizontal", "spacing": "md", "margin": "xs",
                         "contents": [
                             {"type": "text", "text": f"+{m['calories']} kcal ｜ +{m['protein_g']} g 蛋白質", "size": "xs", "color": "#9CA3AF", "flex": 1},
-                            # 每一列自己帶著身分，「要動哪一筆」由「按了哪顆」回答，
-                            # 不再需要用文字表達 —— 這正是舊版只能刪/改最後一筆的原因。
+                            # 每一列自己帶著 id，「要刪哪一筆」由「按了哪顆」回答，
+                            # 不再需要用文字表達 —— 這正是舊版只能刪最後一筆的原因。
                             # 用可點的 text 而非 button：塞進列內不會把卡片撐高。
-                            # 修改用序號、刪除用 id：序號要讓用戶在句子裡看得懂，id 則不必外露。
-                            {"type": "text", "text": "修改", "size": "xs", "color": "#3B82F6", "align": "end", "flex": 0,
-                             "action": {"type": "postback", "data": urlencode({"action": "ask_edit", "idx": str(idx)}),
-                                        "inputOption": "openKeyboard", "fillInText": f"第 {idx} 筆改成 "}},
+                            # 紀錄只能新增或刪除，不提供修改：更正的語意歧義修不掉，
+                            # 猜錯會靜默寫壞既有資料，改用「刪掉重記」這條無歧義的路。
                             {"type": "text", "text": "刪除", "size": "xs", "color": "#EF4444", "align": "end", "flex": 0,
                              "action": {"type": "postback", "data": urlencode({"action": "del_meal", "mid": str(m["id"])})}}
                         ]
@@ -701,6 +684,13 @@ def has_correction_intent(user_msg):
     """用戶是否明確在修正上一筆(而非又吃了別的東西)。"""
     return bool(re.search(CORRECTION_PHRASES, user_msg))
 
+# 「我只吃了10顆水餃」字面上沒有任何更正詞彙，但同樣是在改既有紀錄。
+# 這類句子最危險 —— 沒攔下來就會被記成新的一餐，把熱量加上去而不是減下來。
+PORTION_PHRASES = r'(只吃|只喝|沒吃完|沒喝完|吃不完|喝不完|剩下|剩了|少吃|吃一半|喝一半)'
+
+def has_portion_intent(user_msg):
+    return bool(re.search(PORTION_PHRASES, user_msg))
+
 def _norm_food(s):
     s = re.sub(r'^【.*?】', '', s or '')
     return re.sub(r'[\s()（）]', '', s)
@@ -708,53 +698,16 @@ def _norm_food(s):
 # 份量修正語氣。「我只吃了10顆水餃」這種句子有兩種讀法（更正上一筆 vs 又吃了一餐），
 # 差一整餐的熱量，而現有四層防禦對它全部休眠 —— 意圖完全落在模型手上。
 # 命中時一律回頭問用戶，不讓模型自己拍板。
-PORTION_PHRASES = r'(只吃|只喝|沒吃完|沒喝完|吃不完|喝不完|剩下|剩了|少吃|吃一半|喝一半)'
-
-def has_portion_intent(user_msg):
-    return bool(re.search(PORTION_PHRASES, user_msg))
-
 def mentions_last_meal(user_msg, last_meal):
-    """訊息裡有沒有提到最近一筆的品項。用中文 bigram 比對，
-    數字不參與（否則「10顆」和「15顆」的「顆」會製造假陽性）。"""
+    """訊息裡有沒有提到最近一筆的品項。用中文 bigram 比對，數字不參與
+    (否則「10顆」和「15顆」共用的「顆」會讓什麼都命中)。
+    份量語氣要配上這個條件才算更正 —— 否則「我只吃了一個御飯糰」這種
+    正常的新紀錄會被誤攔。"""
     if not last_meal:
         return False
     name = _norm_food(last_meal.get("food_name"))
     grams = {name[i:i + 2] for i in range(len(name) - 1)}
     return any(re.fullmatch(r'[一-鿿]{2}', g) and g in user_msg for g in grams)
-
-def estimate_portion_cut(last_meal, user_msg):
-    """算出「我只吃了10顆水餃」要從整筆扣掉多少。
-
-    用戶不會補一句「其他照吃」，所以「其他照吃」必須是預設值。
-    從原始總量做減法，沒被提到的品項結構上就動不到 —— 模型只需要對
-    用戶真正提到的那一項估算，不必記得整筆有哪些東西。
-    回傳整包 dict(含份量說法，用來組出用戶看得懂的確認句)，失敗或判斷不出時回 None。"""
-    prompt = (
-        f"原紀錄品項：{last_meal['food_name']}\n"
-        f"整筆總計：{last_meal['calories']} kcal、{last_meal['protein_g']} g 蛋白質\n\n"
-        f"用戶說：「{user_msg}」\n\n"
-        f"用戶只更動了其中一項的份量，訊息裡沒提到的品項一律視為原封不動、照吃完。\n"
-        f"請估算要從整筆總計「扣掉」多少，不要重算整筆總量。\n"
-        f"判斷不出是哪一項或扣多少時，cut_calories 填 0。"
-    )
-    try:
-        interaction = client.interactions.create(
-            model="gemini-3.5-flash-lite",
-            input=prompt,
-            response_format={"type": "text", "mime_type": "application/json", "schema": PortionCutAdapter.json_schema()},
-            store=False  # prompt 內含用戶飲食紀錄，不留存於 Google 端
-        )
-        raw = getattr(interaction, "output_text", None) or (interaction.text if hasattr(interaction, "text") else str(interaction))
-        data = PortionCutAdapter.validate_python(json.loads(raw)).model_dump()
-    except Exception:
-        print("⚠️ 份量扣除估算失敗：")
-        print(traceback.format_exc())
-        return None
-
-    # 扣到 0 或倒扣都代表模型沒抓到重點，寧可回 None 讓上層退回舊行為
-    if not (0 < int(data.get("cut_calories") or 0) < int(last_meal["calories"] or 0)):
-        return None
-    return data
 
 def restates_last_meal(ai_res, last_meal):
     """AI 把上一筆的品項整串重述進來了(常見於誤把新東西併入舊紀錄)。"""
@@ -940,10 +893,8 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
         last_meal_section = (
             f"\n    【最近一筆紀錄】{when}已記錄:{last_meal['food_name']} "
             f"({last_meal['calories']}kcal/{last_meal['protein_g']}g蛋白)。\n"
-            f"    (a)若用戶明確在「修正」這一筆(如「沒有滷雞腿」「其實是228大卡」「記少了」「不是雞腿是雞胸」)，"
-            f"輸出 is_correction=true，food_name 寫更正後的完整內容、calories/protein_g 寫整餐更正後的總量。\n"
-            f"    (b)若用戶是在回報「又吃了別的東西」(如「吃了兩個甜甜圈」「又喝了一杯豆漿」)，這是**新的一筆**:"
-            f"is_correction=false，food_name 只寫這次新吃的東西，calories/protein_g 只算這次新吃的量。"
+            f"    用戶接下來若回報「又吃了別的東西」(如「吃了兩個甜甜圈」「又喝了一杯豆漿」)，這是**新的一筆**:"
+            f"food_name 只寫這次新吃的東西，calories/protein_g 只算這次新吃的量。"
             f"絕對不可把上一筆的品項重複寫進來，那會導致重複計算。\n"
         )
 
@@ -957,7 +908,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
     判斷意圖，依 schema 輸出對應欄位:
     A.飲食紀錄(type=log): 訊息以「我吃了/剛吃了/喝了」等回報語氣開頭者必為此類。欄位名必須是 restaurant(連鎖店名,非連鎖填null)、food_name、calories、protein_g(不可用 total_cal/total_protein)。
       嚴禁編造:若用戶只說了店名或含糊帶過(如「我吃麥當勞」「吃了便當」「午餐吃自助餐」)、沒有講出具體品項或份量，同一家店的熱量可能相差三倍以上，此時必須設 needs_detail=true(calories/protein_g 填 0 即可)，不可自行假設一個平均值。只有用戶講出具體品項(如「大麥克加中薯」)時才給數字。
-      若用戶是在更正剛剛那筆紀錄的數值(如「你記少了」「其實是228大卡」)，同樣輸出 type=log 並設 is_correction=true，calories/protein_g 填更正後的完整正確值(不是差額)，food_name 沿用原品名。
+      紀錄一旦寫入就不能修改，只能刪除後重記。用戶若想更正數值(如「你記少了」「其實是228大卡」)，代碼會在你之前就攔下來，你不會收到這類訊息;萬一收到，也不可把它當成新的一餐記錄。
     B.餐廳推薦/調整(type=recommendation): 設計單餐組合。訊息只有店名或食物類別、沒有「吃了」這類完成語氣時(如「自助餐」「麥當勞」「想吃火鍋」)，一律視為求推薦。僅在「用戶訊息未提及任何店名」且為調整語氣(如:換一個、太多了)時，才沿用上次餐廳{last_restaurant or ''};用戶訊息中提到的店名永遠優先。
       硬性規則(份量最優先): 用戶一天只吃 {total_planned_meals} 餐、今天還剩 {remaining_meals} 餐要分完 {rem_cal} kcal，因此**這一餐必須吃到 {int(meal_cal_cap*0.8)}~{meal_cal_cap} kcal**。給出明顯低於此區間的組合是嚴重錯誤(會害用戶下一餐被迫暴食)，寧可份量加大、加點主食或加倍肉量，也不可湊出一份 400~600 kcal 的輕食。total_protein 目標 {meal_protein_cap}g、至少 {int(meal_protein_cap*0.8)}g，優先組合高蛋白品項(肉類加量/加蛋/豆腐/無糖豆漿)。
       若對品項的熱量/蛋白質數字不確定(特別是超商鮮食、新品、台灣分店限定品項)，先用 google_search 查官方或近期資料再作答，不可憑印象編造。
@@ -969,7 +920,7 @@ def process_ai_in_single_call(profile_str, today_stats, target_stats, user_msg, 
       服務範圍:只回答飲食、營養、熱量、餐廳選擇、以及本服務功能的問題。
       與飲食無關的請求(寫程式、翻譯、數學計算、查新聞、寫文案、情感諮詢等)一律婉拒並拉回本業，例如「我是外食營養師，這方面幫不上忙，但可以幫你規劃下一餐怎麼吃」。絕不可答應、也不可反問對方需要什麼功能。
       能力誠實:{BOT_CAPABILITIES} 用戶詢問尚未開放的功能時，直接說明目前沒有這項功能，不可自行發明操作方式或承諾。
-      你沒有直接刪除或修改資料庫的能力，絕不可聲稱「已刪除」或「已修改」。用戶要刪改紀錄時，請他在今日進度卡片上點該筆右邊的「修改」或「刪除」(任何一筆都可以，不限最近一筆)；也可以直接輸入「刪除上一筆」或「第 2 筆改成 500 大卡」。
+      你沒有直接動資料庫的能力，絕不可聲稱「已刪除」或「已修改」。紀錄不支援修改;用戶想改內容時，請他在今日進度卡片上點該筆右邊的「刪除」(任何一筆都可以，不限最近一筆)，再重新輸入一次。也可以直接輸入「刪除上一筆」。
       只有在用戶詢問額度、進度、還能吃多少時，才提到「熱量剩{rem_cal}kcal、蛋白質差{rem_protein}g」；其他情況不要硬塞這些數字。
     """
     # 查表命中 -> 用自建權威資料,不需搜尋;未命中 -> 開 Google Search 讓模型查即時資料,而非憑記憶猜
@@ -1219,74 +1170,6 @@ def delete_meal_by_id(user_id, meal_id):
     supabase.table("meal_items").delete().eq("id", target["id"]).execute()
     return target
 
-# 卡片「修改」鈕預填的句型。刻意不走 LLM：「哪一筆」和「改成多少」都是明確欄位，
-# 交給模型解讀只會重新引入歧義（500 是整餐還是單品？是總量還是差額？）。
-EDIT_BY_INDEX_RE = re.compile(
-    r'^第\s*(\d+)\s*筆\s*改成\s*(\d+(?:\.\d+)?)\s*(大卡|卡|kcal|克蛋白質|g蛋白質|公克蛋白質|蛋白質|克|g)?\s*$',
-    re.IGNORECASE)
-
-def edit_meal_by_index(user_id, idx, value, unit):
-    """依卡片上的序號更正某一筆的熱量或蛋白質。
-    用序號而非 id：按鈕與後續那則文字訊息之間沒有暫存狀態，資訊只能由句子自己攜帶。
-    回傳 (回覆文字, 是否真的改到)。"""
-    meals = get_today_meals_list(user_id)
-    if not meals:
-        return "今天還沒有任何紀錄可以修改。", False
-    if not (1 <= idx <= len(meals)):
-        return f"今天只有 {len(meals)} 筆紀錄，沒有第 {idx} 筆。", False
-
-    # 允許改成 0:這是用戶自己打出來的明確數字，不是模型填的。
-    # update_last_meal 那邊擋 0 是為了防模型亂填，那個保護只該套用在 AI 那條路上。
-    new_val = int(round(value))
-    if new_val < 0:
-        return "數字看起來不太對，請再確認一次。", False
-
-    is_protein = bool(unit) and ("蛋白" in unit or unit.lower() in ("g", "克"))
-    field, label, u = ("protein_g", "蛋白質", "g") if is_protein else ("calories", "熱量", "kcal")
-
-    target = meals[idx - 1]
-    old_val = int(target.get(field) or 0)
-    supabase.table("meal_items").update({field: new_val}).eq("id", target["id"]).execute()
-    return (f"已更正第 {idx} 筆：\n{target['food_name']}\n{label}：{old_val} {u} → {new_val} {u}"), True
-
-def update_last_meal(user_id, intent_data):
-    """更正今日最後一筆紀錄(數值與品名)。回傳更正後的資料,無可更正時回 None。"""
-    meals = get_today_meals_list(user_id)
-    if not meals:
-        return None
-    last = meals[-1]
-    upd = {}
-    # 只接受正值:用戶僅更正單一數值時,模型可能對另一欄填 0,不可把原本正確的值覆寫成 0。
-    # 這個保護只適用於模型產出的值;用戶自己打的「第 N 筆改成 0 克蛋白質」走
-    # edit_meal_by_index，那條路允許 0。
-    cal_v = intent_data.get("calories")
-    pro_v = intent_data.get("protein_g")
-    if cal_v is not None and float(cal_v) > 0:
-        upd["calories"] = int(round(float(cal_v)))
-    if pro_v is not None and float(pro_v) > 0:
-        upd["protein_g"] = int(round(float(pro_v)))
-
-    # 品名更正:保留原本的【店名】前綴(補述時 AI 常只給品項不給店名)
-    new_name = (intent_data.get("food_name") or "").strip()
-    if new_name:
-        old_prefix = re.match(r'^(【.*?】)', last["food_name"])
-        new_restaurant = intent_data.get("restaurant")
-        if new_restaurant and new_restaurant != "null":
-            upd["food_name"] = f"【{new_restaurant}】{new_name}" if not new_name.startswith("【") else new_name
-        elif old_prefix and not new_name.startswith("【"):
-            upd["food_name"] = f"{old_prefix.group(1)}{new_name}"
-        else:
-            upd["food_name"] = new_name
-
-    if not upd:
-        return None
-    supabase.table("meal_items").update(upd).eq("id", last["id"]).execute()
-    return {
-        "food_name": upd.get("food_name", last["food_name"]),
-        "calories": upd.get("calories", last["calories"]),
-        "protein_g": upd.get("protein_g", last["protein_g"]),
-    }
-
 def log_meal_to_supabase(user_id, intent_data):
     cals = int(round(float(intent_data.get("calories") or 0)))
     protein = int(round(float(intent_data.get("protein_g") or 0)))
@@ -1437,121 +1320,6 @@ def handle_postback(event):
             TextSendMessage(text=f"已刪除：\n{deleted['food_name']}\n-{deleted['calories']} kcal"),
             flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
         ])
-
-    elif action == "ask_edit":
-        # 同 ask_weight：給不支援 inputOption 的舊版客戶端當退路。
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請接著填數字和單位（大卡 或 克蛋白質）。"))
-
-    elif action in ("delta_new", "delta_fix"):
-        profile = get_user_profile(line_user_id)
-        pid = data.get("pid", [""])[0]
-        stash = get_pending_recommendation(pid) if pid else None
-
-        if not profile or not stash or stash.get("_user_id") != profile["id"]:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這個選項已經過期了，請重新描述一次。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
-            return
-
-        user_id = profile["id"]
-        try:
-            supabase.table("pending_recommendations").delete().eq("id", pid).execute()
-        except Exception:
-            pass
-
-        if action == "delta_new":
-            food, cal, protein, _, _ = log_meal_to_supabase(user_id, stash["_delta"])
-            info_label = "成功寫入飲食紀錄"
-        else:
-            result = update_last_meal(user_id, stash["_merged"])
-            if not result:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到可以更正的紀錄。", quick_reply=get_quick_reply(user_id)))
-                return
-            food, cal, protein = result["food_name"], result["calories"], result["protein_g"]
-            info_label = "已更正最近一筆紀錄"
-
-        meals = get_today_meals_list(user_id)
-        cals, protein_total = (
-            sum(int(m.get("calories") or 0) for m in meals),
-            sum(int(m.get("protein_g") or 0) for m in meals),
-        )
-        target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
-        summary_flex = build_today_card(meals, cals=cals, protein=protein_total, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
-                                        last_logged_info={"food": food, "cal": cal, "protein": protein}, info_label=info_label)
-        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
-
-    elif action == "portion_fix":
-        profile = get_user_profile(line_user_id)
-        pid = data.get("pid", [""])[0]
-        stash = get_pending_recommendation(pid) if pid else None
-
-        # 所有權檢查:同 log_meal，防止群組情境下按到別人的卡片
-        if not profile or not stash or stash.get("_user_id") != profile["id"]:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這個選項已經過期了，請重新描述一次。", quick_reply=get_quick_reply(profile["id"] if profile else None)))
-            return
-
-        user_id = profile["id"]
-        # 用後即刪:同一組按鈕再按一次會走「已過期」，防止手滑重複套用
-        try:
-            supabase.table("pending_recommendations").delete().eq("id", pid).execute()
-        except Exception:
-            pass
-
-        # 用扣除後的值，不是 stash 裡那份「當成新一餐」的估算
-        result = update_last_meal(user_id, stash.get("_fix") or stash)
-        if not result:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到可以更正的紀錄。", quick_reply=get_quick_reply(user_id)))
-            return
-        food, cal, protein = result["food_name"], result["calories"], result["protein_g"]
-
-        meals = get_today_meals_list(user_id)
-        cals, protein_total = (
-            sum(int(m.get("calories") or 0) for m in meals),
-            sum(int(m.get("protein_g") or 0) for m in meals),
-        )
-        target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
-        summary_flex = build_today_card(meals, cals=cals, protein=protein_total, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
-                                        last_logged_info={"food": food, "cal": cal, "protein": protein}, info_label="已更正最近一筆紀錄")
-        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
-
-    elif action in ("corr_confirm", "corr_cancel"):
-        profile = get_user_profile(line_user_id)
-        if not profile:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到你的檔案，請先輸入「修改檔案」建檔。"))
-            return
-        user_id = profile["id"]
-
-        if action == "corr_cancel":
-            # 取消不能是死路：把用戶導到卡片上那條不會被誤解的路徑。
-            meals = get_today_meals_list(user_id)
-            cals, protein = (
-                sum(int(m.get("calories") or 0) for m in meals),
-                sum(int(m.get("protein_g") or 0) for m in meals),
-            )
-            target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
-            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, [
-                TextSendMessage(text="已取消，資料沒有變動。\n\n你也可以直接在下面卡片上點該筆的「修改」，指定要改哪一筆、改成多少。"),
-                flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
-            ])
-            return
-
-        intent = {}
-        if data.get("cal"): intent["calories"] = data["cal"][0]
-        if data.get("pro"): intent["protein_g"] = data["pro"][0]
-        corrected = update_last_meal(user_id, intent)
-        if not corrected:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到可以更正的紀錄。", quick_reply=get_quick_reply(user_id)))
-            return
-
-        meals = get_today_meals_list(user_id)
-        cals, protein = (
-            sum(int(m.get("calories") or 0) for m in meals),
-            sum(int(m.get("protein_g") or 0) for m in meals),
-        )
-        target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
-        summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"),
-                                        last_logged_info={"food": corrected["food_name"], "cal": corrected["calories"], "protein": corrected["protein_g"]},
-                                        info_label="已更正最近一筆紀錄")
-        line_bot_api.reply_message(event.reply_token, flex_message(alt_text="更正成功與今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
 
     elif action == "ask_weight":
         # openKeyboard 已經幫用戶預填好「體重 」了，這則回覆是給不支援 inputOption
@@ -1728,21 +1496,23 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
-        # 「第 2 筆改成 500 大卡」:卡片「修改」鈕預填的句型,純正規式、不經過 LLM。
-        # 擺在 AI 呼叫之前,確保這條確定性路徑不會被模型攔截後重新解讀。
-        edit_m = EDIT_BY_INDEX_RE.match(user_msg)
-        if edit_m:
-            edit_msg, changed = edit_meal_by_index(user_id, int(edit_m.group(1)), float(edit_m.group(2)), edit_m.group(3))
-            if not changed:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=edit_msg, quick_reply=get_quick_reply(user_id)))
-                return
-            meals = get_today_meals_list(user_id)
+        # 更正語氣攔截。紀錄只能新增或刪除，不支援修改。
+        # 一定要擺在 AI 呼叫之前:「你記少了，是 500 大卡」落到模型手上很可能被
+        # 判成新的一餐而多加 500 大卡 —— 靜默記錯比不能改嚴重得多。
+        # 也不能默不作聲，否則用戶會以為壞掉而一直重打;給明確說法加卡片，讓他直接刪。
+        meals = get_today_meals_list(user_id)
+        last_logged = meals[-1] if meals else None
+        if last_logged and (has_correction_intent(user_msg)
+                            or (has_portion_intent(user_msg) and mentions_last_meal(user_msg, last_logged))):
             cals, protein = (
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
             summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=edit_msg), flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
+            line_bot_api.reply_message(event.reply_token, [
+                TextSendMessage(text="紀錄沒辦法修改。\n\n請在下面卡片上刪除那一筆，再重新輸入一次。"),
+                flex_message(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+            ])
             return
 
         last_restaurant = get_last_restaurant(profile)
@@ -1794,41 +1564,17 @@ def handle_message(event):
         msg_type = ai_res.get("type")
 
         if msg_type == "log":
-            # AI 把上一筆的品項整串重述進來時，依用戶語氣分流:
+            # AI 把上一筆的品項整串重述進來 = 誤把新食物併進了舊紀錄。
+            # 更正語氣在呼叫 AI 之前就攔掉了，走到這裡一定是「又吃了別的」，
+            # 所以直接拆出增量當新的一筆，不需要再問。
             if restates_last_meal(ai_res, last_meal):
-                if has_correction_intent(user_msg):
-                    ai_res["is_correction"] = True   # 真的在修正這一筆
-                else:
-                    # 用戶只是又吃了別的東西，AI 誤併 -> 拆出增量當新的一筆
-                    delta = extract_delta_entry(ai_res, last_meal)
-                    if delta:
-                        # 拆得出增量不等於用戶就是「又吃了」——這是系統在重新解讀他的話，
-                        # 兩種讀法差一整筆紀錄，不該靜默決定。攤開讓他選。
-                        print(f"⚠️ AI 誤併入上一筆，攤開兩種讀法:{delta['food_name']} {delta['calories']}kcal")
-                        pid = save_pending_recommendation(user_id, {
-                            "_delta": delta,
-                            "_merged": {
-                                "calories": ai_res.get("calories"),
-                                "protein_g": ai_res.get("protein_g"),
-                                "food_name": ai_res.get("food_name"),
-                                "restaurant": ai_res.get("restaurant"),
-                            },
-                        })
-                        new_label = f"再記一筆 +{delta['calories']} kcal"
-                        q = QuickReply(items=[
-                            QuickReplyButton(action=PostbackAction(label=new_label, data=urlencode({"action": "delta_new", "pid": str(pid)}), display_text=new_label)),
-                            QuickReplyButton(action=PostbackAction(label="更正剛剛那筆", data=urlencode({"action": "delta_fix", "pid": str(pid)}), display_text="更正剛剛那筆")),
-                            QuickReplyButton(action=PostbackAction(label="取消", data=urlencode({"action": "corr_cancel"}), display_text="取消"))
-                        ])
-                        line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                            text=(f"剛剛記的是：\n{last_meal['food_name']}\n"
-                                  f"{last_meal['calories']} kcal ｜ {last_meal['protein_g']} g 蛋白質\n\n"
-                                  f"你說「{user_msg}」，是指？"),
-                            quick_reply=q))
-                        return
+                delta = extract_delta_entry(ai_res, last_meal)
+                if delta:
+                    print(f"⚠️ AI 誤併入上一筆，拆出增量:{delta['food_name']} {delta['calories']}kcal")
+                    ai_res.update(delta)
 
             # 資訊不足(只講店名)時不編造數字
-            if not ai_res.get("is_correction") and is_vague_log(ai_res):
+            if is_vague_log(ai_res):
                 # 訊息從未提到「吃/喝」-> 用戶只是報了店名(如「自助餐」)，應該給推薦而不是追問吃了什麼
                 if not re.search(r'[吃喝]', user_msg):
                     print(f"⚠️ 純店名被判為紀錄，改判求推薦:{user_msg}")
@@ -1844,79 +1590,6 @@ def handle_message(event):
                     return
 
         if msg_type == "log":
-
-            # 份量修正:「更正上一筆」和「又吃了一餐」在字面上幾乎無法區分，
-            # 猜錯就是整餐熱量的差距。把兩種讀法攤成選擇題，由用戶拍板。
-            # ai_res 太大塞不進 postback(上限 300 字元)，借用 pending_recommendations 暫存。
-            if last_meal and has_portion_intent(user_msg) and mentions_last_meal(user_msg, last_meal):
-                # 更正值改用「原總量減去扣除」，而不是拿主流程算的整餐重估值
-                cut = estimate_portion_cut(last_meal, user_msg)
-                if cut:
-                    new_cal = max(0, int(last_meal["calories"] or 0) - int(cut["cut_calories"]))
-                    new_pro = max(0, int(last_meal["protein_g"] or 0) - int(cut["cut_protein_g"]))
-                    new_name = (cut.get("new_name") or "").strip()
-
-                    # 用用戶自己的單位問他:他講的是「顆」，不是「大卡」。
-                    # 熱量是系統的帳，降成括號附註，不當成他要拍板的東西。
-                    item, to_amt = (cut.get("item") or "該品項").strip(), (cut.get("to_amount") or "").strip()
-                    frm = (cut.get("from_amount") or "").strip()
-                    ask = (f"要把「{item}」從 {frm} 改成 {to_amt} 嗎？" if frm and to_amt
-                           else f"要把「{item}」改成 {to_amt} 嗎？" if to_amt
-                           else f"要更正「{item}」的份量嗎？")
-                    if (cut.get("unchanged") or "").strip():
-                        ask += f"\n{cut['unchanged'].strip()} 維持不變。"
-                    reason = f"{ask}\n\n（總熱量 {last_meal['calories']} → {new_cal} kcal）"
-                    fix_label = f"對，改成 {to_amt}" if to_amt and len(to_amt) <= 12 else f"對，改成 {new_cal} kcal"
-                else:
-                    # 估算失敗 -> 退回主流程的重估值。這時沒有份量資訊可用，
-                    # 只能用熱量問，並標明會覆蓋整筆。
-                    cal_v = ai_res.get("calories")
-                    new_cal = int(round(float(cal_v))) if cal_v is not None and float(cal_v) > 0 else None
-                    new_pro, new_name = None, ""
-                    reason = f"要把這一筆改成 {new_cal} kcal 嗎？\n（會覆蓋整筆，含其他品項）"
-                    fix_label = f"整筆改成 {new_cal} kcal" if new_cal else None
-
-                if fix_label:
-                    stash = dict(ai_res)
-                    stash["_fix"] = {"calories": new_cal, "protein_g": new_pro, "food_name": new_name}
-                    pid = save_pending_recommendation(user_id, stash)
-                    q = QuickReply(items=[
-                        QuickReplyButton(action=PostbackAction(label=fix_label, data=urlencode({"action": "portion_fix", "pid": str(pid)}), display_text=fix_label)),
-                        QuickReplyButton(action=PostbackAction(label="取消", data=urlencode({"action": "corr_cancel"}), display_text="取消"))
-                    ])
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                        text=(f"最近一筆：\n{last_meal['food_name']}\n\n{reason}"),
-                        quick_reply=q))
-                    return
-
-            if ai_res.get("is_correction"):
-                # 更正不直接寫入:「其實是 500 大卡」到底指整餐還是單品,語意本身就有兩種讀法,
-                # 不是模型的錯也修不掉。先把模型的理解攤開讓用戶過目,由用戶按下確定才算數。
-                last = (get_today_meals_list(user_id) or [None])[-1]
-                if last:
-                    cal_v = ai_res.get("calories")
-                    pro_v = ai_res.get("protein_g")
-                    new_cal = int(round(float(cal_v))) if cal_v is not None and float(cal_v) > 0 else None
-                    new_pro = int(round(float(pro_v))) if pro_v is not None and float(pro_v) > 0 else None
-
-                    if new_cal or new_pro:
-                        diffs = []
-                        if new_cal and new_cal != int(last.get("calories") or 0):
-                            diffs.append(f"熱量：{last.get('calories')} → {new_cal} kcal")
-                        if new_pro and new_pro != int(last.get("protein_g") or 0):
-                            diffs.append(f"蛋白質：{last.get('protein_g')} → {new_pro} g")
-                        if diffs:
-                            payload = {"action": "corr_confirm"}
-                            if new_cal: payload["cal"] = str(new_cal)
-                            if new_pro: payload["pro"] = str(new_pro)
-                            q = QuickReply(items=[
-                                QuickReplyButton(action=PostbackAction(label="確定更正", data=urlencode(payload), display_text="確定更正")),
-                                QuickReplyButton(action=PostbackAction(label="取消", data=urlencode({"action": "corr_cancel"}), display_text="取消"))
-                            ])
-                            line_bot_api.reply_message(event.reply_token, TextSendMessage(
-                                text=f"要把這一筆改成這樣嗎？\n\n{last['food_name']}\n" + "\n".join(diffs), quick_reply=q))
-                            return
-                # 今日無紀錄可更正 -> 往下當成新紀錄寫入
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
             meals_now = get_today_meals_list(user_id)
             summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
