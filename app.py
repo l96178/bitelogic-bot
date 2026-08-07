@@ -216,9 +216,24 @@ def build_profile_flex_card(profile):
                 {"type": "separator", "margin": "md"},
                 _section_caption("每日控制目標"),
                 _kv_row("總熱量", f"{tc} kcal", sub=f"TDEE 的 {pct}%"),
-                _kv_row("蛋白質", f"{tp} g"),
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "提示：輸入「修改檔案」可重新建檔；輸入「體重 104.5」可更新體重並同步目標。", "size": "xs", "color": "#6B7280", "wrap": True, "margin": "md"}
+                _kv_row("蛋白質", f"{tp} g")
+            ]
+        },
+        # 原本是一行文字提示，改成按鈕：指令不用背也不用打字。
+        # Flex 按鈕會留在對話紀錄裡（quick reply 用過就消失），往回捲仍然可以點。
+        "footer": {
+            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg",
+            "contents": [
+                # 體重要帶數字，按鈕沒辦法直接送值：openKeyboard 會打開鍵盤並預填「體重 」，
+                # 用戶只補數字，剛好命中 handle_message 的 ^體重\s*數字$ 正規式。
+                # inputOption 需 LINE 12.6.0+，舊版點了鍵盤不會開，靠 ask_weight 分支回提示當退路。
+                {"type": "button", "style": "secondary", "height": "sm", "action": {
+                    "type": "postback", "label": "更新體重", "data": urlencode({"action": "ask_weight"}),
+                    "inputOption": "openKeyboard", "fillInText": "體重 "}},
+                {"type": "button", "style": "secondary", "height": "sm", "action": {
+                    "type": "message", "label": "體重紀錄", "text": "體重紀錄"}},
+                {"type": "button", "style": "secondary", "height": "sm", "action": {
+                    "type": "message", "label": "修改檔案", "text": "修改檔案"}}
             ]
         }
     }
@@ -268,7 +283,17 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
             body_contents.append({
                 "type": "box", "layout": "vertical", "margin": "sm",
                 "contents": [
-                    {"type": "text", "text": f"{idx}. {m['food_name']}", "size": "sm", "color": "#1F2937", "wrap": True},
+                    {
+                        "type": "box", "layout": "horizontal", "spacing": "sm",
+                        "contents": [
+                            {"type": "text", "text": f"{idx}. {m['food_name']}", "size": "sm", "color": "#1F2937", "wrap": True, "flex": 1},
+                            # 每一列自己帶著 meal_id，「要刪哪一筆」由「按了哪顆」回答，
+                            # 不再需要用文字表達 —— 這正是舊版只能刪最後一筆的原因。
+                            # 用可點的 text 而非 button：塞進列內不會把卡片撐高。
+                            {"type": "text", "text": "刪除", "size": "xs", "color": "#EF4444", "align": "end", "flex": 0,
+                             "action": {"type": "postback", "data": urlencode({"action": "del_meal", "mid": str(m["id"])})}}
+                        ]
+                    },
                     {"type": "text", "text": f"+{m['calories']} kcal ｜ +{m['protein_g']} g 蛋白質", "size": "xs", "color": "#9CA3AF", "margin": "xs"}
                 ]
             })
@@ -283,12 +308,10 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
         {"type": "separator", "margin": "lg"},
         _progress_bar_block("熱量攝取", cals, target_cal, "kcal", "#27AE60"),
         _progress_bar_block("蛋白質攝取", protein, target_protein, "g", "#3B82F6"),
-        {"type": "text", "text": footer_line, "size": "xs", "color": "#6B7280", "margin": "md", "wrap": True},
-        {"type": "separator", "margin": "md"},
-        {"type": "text", "text": "提示：輸入「刪除上一筆」可撤銷、「你記少了,是X大卡」可更正最近一筆。", "size": "xs", "color": "#6B7280", "wrap": True}
+        {"type": "text", "text": footer_line, "size": "xs", "color": "#6B7280", "margin": "md", "wrap": True}
     ])
 
-    return {
+    card = {
         "type": "bubble", "size": "mega",
         "header": {
             "type": "box", "layout": "vertical", "backgroundColor": "#1F2937", "paddingAll": "lg",
@@ -299,6 +322,20 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
         },
         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": body_contents}
     }
+
+    # 更正仍然只作用在最近一筆（update_last_meal），所以維持單顆按鈕而非逐列。
+    # 數字沒辦法用按鈕直接送，靠 openKeyboard 預填句型讓用戶只補金額。
+    if meals:
+        card["footer"] = {
+            "type": "box", "layout": "vertical", "paddingAll": "lg",
+            "contents": [
+                {"type": "button", "style": "secondary", "height": "sm", "action": {
+                    "type": "postback", "label": "更正最近一筆", "data": urlencode({"action": "ask_correct"}),
+                    "inputOption": "openKeyboard", "fillInText": "你記少了，是 "}}
+            ]
+        }
+
+    return card
 
 def get_quick_reply(user_id=None):
     base_items = [
@@ -343,7 +380,9 @@ FIELD_LABELS = {"height_cm": ("身高", "公分"), "weight_kg": ("體重", "公�
 BMI_COMMON = (14, 60)
 BMI_POSSIBLE = (8, 130)
 # 建檔第 1 步的提示文字，錯誤訊息與提問共用，避免格式說明散落各處而不一致。
-PROFILE_INPUT_HINT = "【身高 / 體重 / 年齡】\n範例：170 / 60 / 23"
+# 開頭的換行是必要的：接在「請回覆」後面時，LINE 的訊息寬度會把【…】折斷成
+# 「年齡】」孤字，自己先斷行才能讓整組欄位名稱完整落在同一行。
+PROFILE_INPUT_HINT = "\n【身高 / 體重 / 年齡】\n範例：170 / 60 / 23"
 PROFILE_RETRY_HINT = f"請重新輸入{PROFILE_INPUT_HINT}"
 
 def parse_basic_profile(raw_text, strict=False):
@@ -999,6 +1038,21 @@ def delete_last_meal(user_id):
     supabase.table("meal_items").delete().eq("id", last_meal["id"]).execute()
     return f"已成功刪除最近一筆紀錄：【{last_meal['food_name']}】(-{last_meal['calories']} kcal)"
 
+def get_today_meal_by_id(user_id, meal_id):
+    """依 id 取回今日某一筆紀錄。postback data 是客戶端送來的，不能拿到 id 就直接信 —
+    一律回頭比對「這筆是不是該用戶今天的紀錄」，避免偽造 id 刪到別人的資料。"""
+    if not meal_id:
+        return None
+    return next((m for m in get_today_meals_list(user_id) if str(m["id"]) == str(meal_id)), None)
+
+def delete_meal_by_id(user_id, meal_id):
+    """刪除今日指定的一筆紀錄，回傳被刪掉的那筆；找不到(已刪或不屬於本人)時回 None。"""
+    target = get_today_meal_by_id(user_id, meal_id)
+    if not target:
+        return None
+    supabase.table("meal_items").delete().eq("id", target["id"]).execute()
+    return target
+
 def update_last_meal(user_id, intent_data):
     """更正今日最後一筆紀錄(數值與品名)。回傳更正後的資料,無可更正時回 None。"""
     meals = get_today_meals_list(user_id)
@@ -1141,6 +1195,60 @@ def handle_postback(event):
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_res.get("reply_text") or "重新推薦失敗，請再試一次。", quick_reply=get_quick_reply(user_id)))
 
+    elif action in ("del_meal", "del_confirm", "del_cancel"):
+        profile = get_user_profile(line_user_id)
+        if not profile:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到你的檔案，請先輸入「修改檔案」建檔。"))
+            return
+
+        user_id = profile["id"]
+        if action == "del_cancel":
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已取消，沒有刪除任何紀錄。", quick_reply=get_quick_reply(user_id)))
+            return
+
+        mid = data.get("mid", [""])[0]
+
+        # 第一段：只確認、不動資料。刪除是硬刪除且無法復原，誤觸的代價是整筆重打。
+        if action == "del_meal":
+            meal = get_today_meal_by_id(user_id, mid)
+            if not meal:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這筆紀錄已經不在了。", quick_reply=get_quick_reply(user_id)))
+                return
+            q = QuickReply(items=[
+                QuickReplyButton(action=PostbackAction(label="確定刪除", data=urlencode({"action": "del_confirm", "mid": mid}), display_text="確定刪除")),
+                QuickReplyButton(action=PostbackAction(label="取消", data=urlencode({"action": "del_cancel"}), display_text="取消"))
+            ])
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(
+                text=f"確定刪除【{meal['food_name']}】？\n(-{meal['calories']} kcal)", quick_reply=q))
+            return
+
+        # 第二段：真的刪。同一張卡片按兩次時第二次會落在這裡並找不到目標。
+        deleted = delete_meal_by_id(user_id, mid)
+        if not deleted:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="這筆紀錄已經不在了。", quick_reply=get_quick_reply(user_id)))
+            return
+
+        meals = get_today_meals_list(user_id)
+        cals, protein = (
+            sum(int(m.get("calories") or 0) for m in meals),
+            sum(int(m.get("protein_g") or 0) for m in meals),
+        )
+        target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
+        summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
+        line_bot_api.reply_message(event.reply_token, [
+            TextSendMessage(text=f"已刪除【{deleted['food_name']}】(-{deleted['calories']} kcal)"),
+            FlexSendMessage(alt_text="今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
+        ])
+
+    elif action == "ask_correct":
+        # 同 ask_weight：給不支援 inputOption 的舊版客戶端當退路。
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請說明正確的熱量，例如：你記少了，是 500 大卡"))
+
+    elif action == "ask_weight":
+        # openKeyboard 已經幫用戶預填好「體重 」了，這則回覆是給不支援 inputOption
+        # 的舊版客戶端當退路，否則按鈕點下去毫無反應。
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請輸入目前體重，例如：體重 104.5"))
+
     elif action == "confirm_hw":
         h, w, a, g = data.get("h", ["170"])[0], data.get("w", ["70"])[0], data.get("a", ["30"])[0], data.get("g", [""])[0]
         line_bot_api.reply_message(event.reply_token, build_next_step_reply(h, w, a, g))
@@ -1200,11 +1308,17 @@ def handle_postback(event):
                 print("⚠️ 建檔體重寫入 weight_logs 失敗：")
                 print(traceback.format_exc())
 
-        welcome_text = "【專屬健康檔案建檔成功】\n\n提示：點下方按鈕試試看，或直接輸入任何想吃的餐廳！"
+        # 提示擺在卡片「之後」：檔案卡片幾乎佔滿一個螢幕，提示放前面會被推出視線外，
+        # 用戶滑到底只看到 quick reply 的超商按鈕，誤以為只能選那幾家（實測回饋）。
+        # quick reply 只會顯示在回覆陣列的最後一則訊息上，所以它必須跟著提示一起搬到末尾。
+        # 範例刻意避開超商，否則只是加強「這是超商專用工具」的印象。
+        welcome_text = ("【建檔成功】\n\n"
+                        "想吃什麼直接輸入店名就好，例如：麥當勞、八方雲集、鬍鬚張。\n"
+                        "下方按鈕只是捷徑，不限這幾家。")
         if new_profile:
             line_bot_api.reply_message(event.reply_token, [
-                TextSendMessage(text=welcome_text),
-                FlexSendMessage(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile), quick_reply=get_quick_reply(new_profile["id"]))
+                FlexSendMessage(alt_text="我的健康檔案", contents=build_profile_flex_card(new_profile)),
+                TextSendMessage(text=welcome_text, quick_reply=get_quick_reply(new_profile["id"]))
             ])
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=welcome_text, quick_reply=get_quick_reply(None)))
