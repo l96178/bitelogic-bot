@@ -896,7 +896,11 @@ def build_week_flex_card(stats, goal):
          "size": "sm", "weight": "bold", "color": "#1F2937"},
         *_week_chart_block(stats["days"], stats["target_cal"], in_color, over_color),
         {"type": "separator", "margin": "lg"},
-        _progress_bar_block("累積攝取", stats["actual_intake"], stats["should_intake"], "kcal", in_color, over_color),
+        # 分母用維持熱量而不是目標：條子沒填滿的那一段，長度就是下面那行赤字。
+        # 圖跟數字講同一件事，才不會被當成兩套算法打架。
+        # 「填滿」在這裡是壞事（吃到維持熱量＝沒瘦），顏色已經在講這件事：
+        # 減脂是未滿綠、超過紅，增肌相反。
+        _progress_bar_block("累積攝取", stats["actual_intake"], stats["maintain_intake"], "kcal", in_color, over_color),
         {
             "type": "box", "layout": "horizontal", "margin": "md", "contents": [
                 {"type": "text", "text": diff_label, "size": "sm", "weight": "bold", "color": "#374151"},

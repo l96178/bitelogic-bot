@@ -358,8 +358,8 @@ def test_card_muscle_gain_flips_colors():
 
 @case
 def test_card_muscle_gain_over_target_bar_is_green():
-    """增肌時吃超過目標是好事，驗收 5 的另一半：進度條轉綠，不是停在藍。"""
-    card = week_card([2400, 2400, 2400, None, None, None, None], goal="muscle_gain")
+    """增肌時吃超過維持熱量是好事，驗收 5 的另一半：進度條轉綠，不是停在藍。"""
+    card = week_card([3000, 3000, 3000, None, None, None, None], goal="muscle_gain")
     bar = find_bar_colors(card)
     assert bar == "#27AE60", bar
 
@@ -412,9 +412,11 @@ def test_card_chart_colors_match_progress_bar_muscle_gain():
 
 @case
 def test_card_shows_real_pct_when_over():
-    """驗收 4：單日超標時進度條文字顯示真實百分比。"""
-    card = week_card([2400, 2400, 2400, None, None, None, None])
-    label = find_text(card, "7200 / 6000")
+    """驗收 4：吃超過維持熱量時進度條文字顯示真實百分比，不是被夾住的 100%。
+
+    3 天各吃 3000、維持熱量 2500 → 9000 / 7500 = 120%。"""
+    card = week_card([3000, 3000, 3000, None, None, None, None])
+    label = find_text(card, "9000 / 7500")
     assert label is not None and "(120%)" in label, label
 
 
@@ -513,6 +515,24 @@ def test_quick_reply_has_week_button():
 def test_capabilities_mentions_week_summary():
     assert "本週總結" in app.BOT_CAPABILITIES, app.BOT_CAPABILITIES
     assert "週報" not in app.BOT_CAPABILITIES.split("尚未開放")[1], app.BOT_CAPABILITIES
+
+
+@case
+def test_card_bar_gap_equals_the_deficit():
+    """進度條沒填滿的那一段，長度就是底下那行赤字。
+
+    兩者用不同分母（條子用目標、赤字用維持熱量）的話，同一張卡片會出現
+    「缺口 995、赤字卻寫 2507」，看起來像算錯 —— 這個測試就是防這件事。"""
+    stats = app.summarize_week_days(fake_days([1800, 1800, 1800] + [None] * 4), 2000, 160, 2500)
+    card = app.build_week_flex_card(stats, "fat_loss")
+    label = find_text(card, "累積攝取")
+    assert label is not None
+    # 不能用 " / " 找，「熱量達標 3 / 3 天」會先命中。
+    value = find_text(card, " kcal (")
+    numer, denom = [int(x) for x in value.split(" kcal")[0].split(" / ")]
+    assert denom == stats["maintain_intake"], (denom, stats["maintain_intake"])
+    assert denom - numer == abs(stats["tdee_diff"]), (denom - numer, stats["tdee_diff"])
+    assert find_text(card, f"{abs(stats['tdee_diff'])} kcal") is not None
 
 
 # ---------- 進度條版面 ----------
