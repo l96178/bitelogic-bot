@@ -784,6 +784,44 @@ def _weight_chart_block(rows):
          "size": "xxs", "color": "#9CA3AF", "align": "center", "margin": "sm"},
     ]
 
+CHART_GREY = "#9CA3AF"       # 沒有記錄的那一天
+CHART_MIN_FLEX = 8           # 有記錄但熱量極低時的最低柱高
+CHART_UNLOGGED_FLEX = 6      # 沒記錄的柱高，刻意比 CHART_MIN_FLEX 更矮
+
+
+def _week_chart_block(days, target_cal, in_color, over_color):
+    """逐日熱量直條圖。手法與 _weight_chart_block 相同：filler + flex 比例撐高度。
+
+    與體重圖不同，縱軸從 0 起算 —— 「今天吃了多少」的 0 是真的 0，
+    不像體重那樣需要放大幾公斤的差異。柱高以區間內最高的單日熱量為分母。
+
+    沒記錄的日子畫一根灰色矮柱而不是留白：留白會被讀成「那天吃 0 卡」，
+    那正是這張卡片最想避免的誤解。"""
+    peak = max([d["calories"] for d in days if d["logged"]] or [0])
+
+    cols, labels = [], []
+    for d in days:
+        if not d["logged"]:
+            flex, color = CHART_UNLOGGED_FLEX, CHART_GREY
+        else:
+            pct = int(round(d["calories"] / peak * 100)) if peak > 0 else CHART_MIN_FLEX
+            flex = min(100, max(CHART_MIN_FLEX, pct))
+            color = over_color if d["calories"] > target_cal else in_color
+        cols.append({
+            "type": "box", "layout": "vertical", "contents": [
+                {"type": "filler", "flex": max(1, 100 - flex)},
+                {"type": "box", "layout": "vertical", "flex": flex, "backgroundColor": color,
+                 "cornerRadius": "sm", "contents": [{"type": "filler"}]}
+            ]
+        })
+        labels.append({"type": "text", "text": d["date"][5:].replace("-", "/"),
+                       "size": "xxs", "color": CHART_GREY, "align": "center", "flex": 1})
+
+    return [
+        {"type": "box", "layout": "horizontal", "height": "96px", "spacing": "xs", "margin": "lg", "contents": cols},
+        {"type": "box", "layout": "horizontal", "spacing": "xs", "margin": "sm", "contents": labels},
+    ]
+
 def build_weight_flex_card(rows):
     """體重趨勢卡片。rows 由舊到新，至少一筆。"""
     weights = [float(r["weight_kg"]) for r in rows]

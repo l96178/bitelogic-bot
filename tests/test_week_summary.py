@@ -160,6 +160,64 @@ def test_summarize_date_bounds():
     assert s["end_date"] == "2026-08-07", s["end_date"]
 
 
+# ---------- _week_chart_block ----------
+
+GREY = "#9CA3AF"
+
+
+def chart_bars(blocks):
+    """從圖表 block 取出每一根柱子的 (顏色, flex 高度)。"""
+    cols = blocks[0]["contents"]
+    out = []
+    for col in cols:
+        bar = col["contents"][1]
+        out.append((bar["backgroundColor"], bar["flex"]))
+    return out
+
+
+@case
+def test_chart_colors_by_day_state():
+    """在目標內綠、超標紅、沒記錄灰。"""
+    days = fake_days([1800, 2400, None, 2000, 1500, 2001, 1000])
+    bars = chart_bars(app._week_chart_block(days, 2000, "#27AE60", "#EF4444"))
+    colors = [c for c, _ in bars]
+    assert colors == ["#27AE60", "#EF4444", GREY, "#27AE60", "#27AE60", "#EF4444", "#27AE60"], colors
+
+
+@case
+def test_chart_colors_follow_goal():
+    """增肌時顏色跟著進度條一起換，同一張卡片不能出現兩套語意。"""
+    days = fake_days([1800, 2400, None] + [None] * 4)
+    bars = chart_bars(app._week_chart_block(days, 2000, "#3B82F6", "#27AE60"))
+    assert [c for c, _ in bars][:3] == ["#3B82F6", "#27AE60", GREY], bars
+
+
+@case
+def test_chart_unlogged_bar_is_short_not_zero():
+    """沒記錄的柱子給最低高度 —— 完全不畫會被讀成「那天吃 0 卡」。"""
+    days = fake_days([2000, None] + [None] * 5)
+    bars = chart_bars(app._week_chart_block(days, 2000, "#27AE60", "#EF4444"))
+    assert bars[0][1] == 100, bars[0]
+    assert 0 < bars[1][1] < 20, bars[1]
+
+
+@case
+def test_chart_all_zero_no_division_by_zero():
+    """所有日熱量皆為 0 時不可除以零。"""
+    days = fake_days([0] * 7)
+    bars = chart_bars(app._week_chart_block(days, 2000, "#27AE60", "#EF4444"))
+    assert len(bars) == 7
+    assert all(h > 0 for _, h in bars), bars
+
+
+@case
+def test_chart_labels_are_month_day():
+    days = fake_days([1800] * 7)
+    labels = [t["text"] for t in iter_texts(app._week_chart_block(days, 2000, "#27AE60", "#EF4444")[1])]
+    assert labels[0] == "08/01", labels
+    assert labels[-1] == "08/07", labels
+
+
 # ---------- runner ----------
 
 def main():
