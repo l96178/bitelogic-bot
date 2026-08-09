@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# LINE 頭像原圖：頭像是在 LINE 官方帳號後台設定的，程式從未讀取這個檔案。
+# 1.8MB 進 repo 會讓 clone 大小變成 17 倍，留在本機就好。
+Gemini_Generated_Image_*.jpg
