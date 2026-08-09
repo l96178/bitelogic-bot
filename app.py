@@ -682,6 +682,70 @@ def log_weight(user_id, weight, profile):
     lines.append("\n提示:輸入「體重紀錄」可查看近期趨勢。")
     return "\n".join(lines)
 
+WEEK_DAYS = 7
+# 沒有 target 時的保底值，與 handle_message 內的既有 fallback 一致。
+DEFAULT_TARGET_CAL, DEFAULT_TARGET_PROTEIN = 2000, 150
+
+def summarize_week_days(days, target_cal, target_protein):
+    """把逐日資料算成近 7 天的彙總。純算術，不查資料庫（所以能用假資料測）。
+
+    days 由舊到新，每筆 {date, calories, protein, logged}。
+
+    分母一律是「有記錄的天數」而不是 7：沒記錄的那幾天用戶還是有吃，只是沒記，
+    用 7 天算應攝取會得到灌水的赤字，讓減脂的人以為自己瘦了。
+    一個假的赤字比沒有赤字更糟。"""
+    target_cal = target_cal or DEFAULT_TARGET_CAL
+    target_protein = target_protein or DEFAULT_TARGET_PROTEIN
+
+    logged = [d for d in days if d["logged"]]
+    logged_days = len(logged)
+    actual = sum(int(d["calories"]) for d in logged)
+    protein_sum = sum(int(d["protein"]) for d in logged)
+    should = logged_days * target_cal
+
+    return {
+        "days": days,
+        "logged_days": logged_days,
+        "on_target_days": sum(1 for d in logged if d["calories"] <= target_cal),
+        "actual_intake": actual,
+        "should_intake": should,
+        "diff": actual - should,
+        "avg_cal": round(actual / logged_days) if logged_days else 0,
+        "avg_protein": round(protein_sum / logged_days) if logged_days else 0,
+        "target_cal": target_cal,
+        "target_protein": target_protein,
+        "start_date": days[0]["date"],
+        "end_date": days[-1]["date"],
+    }
+
+def get_week_stats(user_id, target_cal, target_protein):
+    """近 7 天（含今天）的飲食彙總。兩次查詢，不做任何渲染。
+
+    「有記錄」的定義是該日至少有一筆 meal_items —— 只開了 daily_logs 卻沒寫入
+    任何一筆的日子（例如查了今日進度就離開）不算，否則會被當成「那天吃 0 卡」。"""
+    today = datetime.now(TAIWAN_TZ).date()
+    dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(WEEK_DAYS - 1, -1, -1)]
+
+    totals = {d: {"calories": 0, "protein": 0, "logged": False} for d in dates}
+
+    logs = supabase.table("daily_logs").select("id, log_date").eq("user_id", user_id) \
+        .gte("log_date", dates[0]).lte("log_date", dates[-1]).execute()
+    id_to_date = {r["id"]: r["log_date"] for r in (logs.data or [])}
+
+    if id_to_date:
+        meals = supabase.table("meal_items").select("daily_log_id, calories, protein_g") \
+            .in_("daily_log_id", list(id_to_date)).execute()
+        for m in (meals.data or []):
+            slot = totals.get(id_to_date.get(m["daily_log_id"]))
+            if slot is None:
+                continue
+            slot["calories"] += int(m.get("calories") or 0)
+            slot["protein"] += int(m.get("protein_g") or 0)
+            slot["logged"] = True
+
+    days = [{"date": d, **totals[d]} for d in dates]
+    return summarize_week_days(days, target_cal, target_protein)
+
 def get_weight_rows(user_id, limit=8):
     """近期體重紀錄，由舊到新。"""
     res = supabase.table("weight_logs").select("log_date, weight_kg").eq("user_id", user_id).order("log_date", desc=True).limit(limit).execute()

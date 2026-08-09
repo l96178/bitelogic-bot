@@ -91,6 +91,75 @@ def test_progress_bar_zero_target():
     assert find_text(block, "(0%)") is not None
 
 
+# ---------- summarize_week_days ----------
+
+def fake_days(cals):
+    """cals 為 7 個值，None 代表當天沒有記錄。蛋白質固定給熱量的 1/20，方便算平均。"""
+    out = []
+    for i, c in enumerate(cals):
+        date = f"2026-08-{i + 1:02d}"
+        if c is None:
+            out.append({"date": date, "calories": 0, "protein": 0, "logged": False})
+        else:
+            out.append({"date": date, "calories": c, "protein": c // 20, "logged": True})
+    return out
+
+
+@case
+def test_summarize_denominator_is_logged_days():
+    """應攝取用「有記錄的天數」當分母，不是 7 —— 否則會算出灌水的假赤字。"""
+    days = fake_days([1800, 1900, 2100, 1700, 1850, None, 1500])
+    s = app.summarize_week_days(days, 2000, 160)
+    assert s["logged_days"] == 6, s["logged_days"]
+    assert s["should_intake"] == 12000, s["should_intake"]
+    assert s["actual_intake"] == 10850, s["actual_intake"]
+    assert s["diff"] == -1150, s["diff"]
+
+
+@case
+def test_summarize_on_target_days():
+    """單日熱量 <= 目標即為達標；沒記錄的那天不算在分母裡。"""
+    days = fake_days([1800, 1900, 2100, 1700, 1850, None, 1500])
+    s = app.summarize_week_days(days, 2000, 160)
+    assert s["on_target_days"] == 5, s["on_target_days"]
+
+
+@case
+def test_summarize_averages_use_logged_days():
+    days = fake_days([1800, 2200, None, None, None, None, None])
+    s = app.summarize_week_days(days, 2000, 160)
+    assert s["avg_cal"] == 2000, s["avg_cal"]
+    assert s["avg_protein"] == 100, s["avg_protein"]
+
+
+@case
+def test_summarize_no_logged_days():
+    """完全沒記錄不可除以零。"""
+    s = app.summarize_week_days(fake_days([None] * 7), 2000, 160)
+    assert s["logged_days"] == 0
+    assert s["should_intake"] == 0
+    assert s["actual_intake"] == 0
+    assert s["diff"] == 0
+    assert s["avg_cal"] == 0
+    assert s["avg_protein"] == 0
+
+
+@case
+def test_summarize_target_fallback():
+    """target 為 None 時沿用既有 fallback 2000 / 150。"""
+    s = app.summarize_week_days(fake_days([1800] + [None] * 6), None, None)
+    assert s["target_cal"] == 2000, s["target_cal"]
+    assert s["target_protein"] == 150, s["target_protein"]
+    assert s["should_intake"] == 2000, s["should_intake"]
+
+
+@case
+def test_summarize_date_bounds():
+    s = app.summarize_week_days(fake_days([1800] * 7), 2000, 160)
+    assert s["start_date"] == "2026-08-01", s["start_date"]
+    assert s["end_date"] == "2026-08-07", s["end_date"]
+
+
 # ---------- runner ----------
 
 def main():
