@@ -348,7 +348,10 @@ def build_profile_flex_card(profile):
     }
 
 def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF4444"):
-    pct = min(100, max(0, int((current / target) * 100))) if target > 0 else 0
+    # 顯示用的百分比不夾上限：夾住會讓超標的 116% 印成 100%，剛好抹掉最該被看見的數字。
+    # 條寬另外夾 —— 那是版面限制，不是資訊。
+    pct = max(0, int(current * 100 / target)) if target > 0 else 0  # 先乘後除,避免浮點誤差把 116% 截成 115%
+    width = min(100, max(3, pct))
     return {
         "type": "box", "layout": "vertical",
         "contents": [
@@ -361,7 +364,7 @@ def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF
             },
             {
                 "type": "box", "layout": "vertical", "backgroundColor": "#E5E7EB", "height": "8px", "cornerRadius": "4px", "margin": "sm",
-                "contents": [{"type": "box", "layout": "vertical", "backgroundColor": over_color if pct >= 100 else bar_color, "height": "8px", "width": f"{max(3, pct)}%", "cornerRadius": "4px", "contents": []}]
+                "contents": [{"type": "box", "layout": "vertical", "backgroundColor": over_color if pct >= 100 else bar_color, "height": "8px", "width": f"{width}%", "cornerRadius": "4px", "contents": []}]
             }
         ]
     }
