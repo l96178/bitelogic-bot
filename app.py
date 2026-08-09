@@ -458,8 +458,10 @@ def _calorie_range_bar_block(label, current, target, tdee, goal=None):
             },
             # cornerRadius 放在外框而不是各分段上：分段自己設圓角的話，第一段的右緣
             # 也會跟著圓，跟下一段之間會露出一個缺口。靠外框裁切才有「兩端圓、中間直」的效果。
-            {"type": "box", "layout": "horizontal", "height": "10px", "margin": "sm",
-             "backgroundColor": BAR_TRACK, "cornerRadius": "5px", "contents": seg},
+            # 高度與圓角必須跟 _progress_bar_block 一致（8px / 4px），
+            # 否則同一張卡片上下兩條粗細不同，一眼就看得出來。
+            {"type": "box", "layout": "horizontal", "height": "8px", "margin": "sm",
+             "backgroundColor": BAR_TRACK, "cornerRadius": "4px", "contents": seg},
             {"type": "text", "text": f"{_gap('目標', target)} ｜ {_gap('維持熱量', tdee)}",
              "size": "xxs", "color": "#9CA3AF", "margin": "xs", "wrap": True},
         ]

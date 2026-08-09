@@ -608,6 +608,15 @@ def test_calorie_bar_upper_is_target_for_muscle_gain():
 
 
 @case
+def test_calorie_bar_matches_progress_bar_geometry():
+    """兩條 bar 在同一張卡片上下相鄰，高度與圓角不一致會被一眼看出來。"""
+    cal = app._calorie_range_bar_block("熱量攝取", 1900, 2015, 2358)["contents"][1]
+    pro = app._progress_bar_block("蛋白質攝取", 145, 160, "g", "#3B82F6")["contents"][1]
+    assert cal["height"] == pro["height"] == "8px", (cal["height"], pro["height"])
+    assert cal["cornerRadius"] == pro["cornerRadius"] == "4px", (cal["cornerRadius"], pro["cornerRadius"])
+
+
+@case
 def test_calorie_bar_says_level_instead_of_zero_gap():
     """剛好打平時說「剛好等於」，不要印「離目標還有 0 kcal」這種廢話。"""
     assert bar_caption(app._calorie_range_bar_block("熱量攝取", 2015, 2015, 2519)) \
