@@ -476,6 +476,21 @@ def test_capabilities_mentions_week_summary():
     assert "週報" not in app.BOT_CAPABILITIES.split("尚未開放")[1], app.BOT_CAPABILITIES
 
 
+# ---------- 進度條版面 ----------
+
+@case
+def test_progress_bar_label_does_not_steal_width():
+    """標籤要縮到剛好，餘寬留給數字。
+
+    橫向 box 的子元件預設各佔一半寬度，實機上「累積攝取」四個字吃掉半格，
+    右邊的「5050 / 6045 kcal (83%)」就被截成「(83...」。"""
+    row = app._progress_bar_block("累積攝取", 5050, 6045, "kcal", "#27AE60")["contents"][0]
+    label, value = row["contents"]
+    assert label["flex"] == 0, label
+    assert value["flex"] == 1, value
+    assert value["text"] == "5050 / 6045 kcal (83%)", value["text"]
+
+
 # ---------- runner ----------
 
 def main():

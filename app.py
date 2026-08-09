@@ -358,8 +358,10 @@ def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF
             {
                 "type": "box", "layout": "horizontal",
                 "contents": [
-                    {"type": "text", "text": label, "size": "sm", "weight": "bold", "color": "#374151"},
-                    {"type": "text", "text": f"{current} / {target} {unit} ({pct}%)", "size": "xs", "align": "end", "color": "#6B7280"}
+                    # flex 不能省：橫向 box 的子元件預設各佔一半，四個字的標籤會白白吃掉半個寬度，
+                    # 右邊的「5050 / 6045 kcal (83%)」就被截成「(83...」。標籤縮到剛好，餘寬全給數字。
+                    {"type": "text", "text": label, "size": "sm", "weight": "bold", "color": "#374151", "flex": 0},
+                    {"type": "text", "text": f"{current} / {target} {unit} ({pct}%)", "size": "xs", "align": "end", "color": "#6B7280", "flex": 1}
                 ]
             },
             {
