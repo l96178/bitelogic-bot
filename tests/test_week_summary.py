@@ -260,17 +260,38 @@ def test_card_surplus_red_for_fat_loss():
 
 
 @case
+def test_card_diff_zero_is_neutral():
+    """實際攝取剛好等於應攝取:累積差額／持平，中性灰，不偏向任一目標。"""
+    card = week_card([2000] + [None] * 6)
+    assert find_text(card, "累積差額") is not None
+    for t in iter_texts(card):
+        if t["text"] == "持平":
+            assert t["color"] == "#6B7280", t
+            break
+    else:
+        raise AssertionError("找不到「持平」")
+
+
+@case
 def test_card_muscle_gain_flips_colors():
     """增肌的人「沒吃到」才是問題：進度條藍→綠，赤字標紅。"""
     card = week_card([1800, 1900, 1700, None, None, None, None], goal="muscle_gain")
     bar = find_bar_colors(card)
     assert bar == "#3B82F6", bar
     for t in iter_texts(card):
-        if "600 kcal" in t["text"] and "累積" not in t["text"]:
+        if "600 kcal" in t["text"]:
             assert t["color"] == "#EF4444", t
             break
     else:
         raise AssertionError("找不到赤字數字")
+
+
+@case
+def test_card_muscle_gain_over_target_bar_is_green():
+    """增肌時吃超過目標是好事，驗收 5 的另一半：進度條轉綠，不是停在藍。"""
+    card = week_card([2400, 2400, 2400, None, None, None, None], goal="muscle_gain")
+    bar = find_bar_colors(card)
+    assert bar == "#27AE60", bar
 
 
 def find_bar_colors(card):
@@ -290,6 +311,33 @@ def iter_boxes(node):
     elif isinstance(node, list):
         for v in node:
             yield from iter_boxes(v)
+
+
+def find_chart_colors(card):
+    """取出卡片內直條圖每一根柱子的顏色（依日期順序），高度 96px 的那個橫列才是圖表，
+    跟高度 8px 的進度條區分開來。"""
+    for node in iter_boxes(card):
+        if node.get("height") == "96px":
+            return [col["contents"][1]["backgroundColor"] for col in node["contents"]]
+    return None
+
+
+@case
+def test_card_chart_colors_match_progress_bar_fat_loss():
+    """圖表柱色要跟進度條共用同一組配色:減脂時目標內綠、超標紅。
+    直接鎖住 build_week_flex_card 呼叫 _week_chart_block 的參數順序，
+    避免 in_color/over_color 被誤傳成 over_color/in_color 卻沒有測試發現。"""
+    card = week_card([1800, 2400, 1900, None, None, None, None])
+    colors = find_chart_colors(card)
+    assert colors == ["#27AE60", "#EF4444", "#27AE60", GREY, GREY, GREY, GREY], colors
+
+
+@case
+def test_card_chart_colors_match_progress_bar_muscle_gain():
+    """增肌時圖表柱色要跟進度條一起換成藍/綠，不能沿用減脂那一套。"""
+    card = week_card([1800, 2400, 1900, None, None, None, None], goal="muscle_gain")
+    colors = find_chart_colors(card)
+    assert colors == ["#3B82F6", "#27AE60", "#3B82F6", GREY, GREY, GREY, GREY], colors
 
 
 @case
