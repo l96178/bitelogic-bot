@@ -218,6 +218,126 @@ def test_chart_labels_are_month_day():
     assert labels[-1] == "08/07", labels
 
 
+# ---------- build_week_flex_card ----------
+
+def week_card(cals, goal="fat_loss", target_cal=2000, target_protein=160):
+    stats = app.summarize_week_days(fake_days(cals), target_cal, target_protein)
+    return app.build_week_flex_card(stats, goal)
+
+
+@case
+def test_card_header_and_on_target_line():
+    card = week_card([1800, 1900, 2100, 1700, 1850, None, 1500])
+    assert find_text(card["header"], "近 7 天總結") is not None
+    assert find_text(card["header"], "08/01") is not None
+    assert find_text(card["header"], "減脂") is not None
+    assert find_text(card, "熱量達標 5 / 6 天") is not None
+
+
+@case
+def test_card_deficit_green_for_fat_loss():
+    """減脂的人有赤字是好消息，標綠。"""
+    card = week_card([1800, 1900, 2100, 1700, 1850, None, 1500])
+    for t in iter_texts(card):
+        if "1150 kcal" in t["text"]:
+            assert t["color"] == "#27AE60", t
+            break
+    else:
+        raise AssertionError("找不到赤字數字")
+    assert find_text(card, "累積赤字") is not None
+
+
+@case
+def test_card_surplus_red_for_fat_loss():
+    card = week_card([2500, 2500, 2500, None, None, None, None])
+    assert find_text(card, "累積盈餘") is not None
+    for t in iter_texts(card):
+        if "1500 kcal" in t["text"]:
+            assert t["color"] == "#EF4444", t
+            break
+    else:
+        raise AssertionError("找不到盈餘數字")
+
+
+@case
+def test_card_muscle_gain_flips_colors():
+    """增肌的人「沒吃到」才是問題：進度條藍→綠，赤字標紅。"""
+    card = week_card([1800, 1900, 1700, None, None, None, None], goal="muscle_gain")
+    bar = find_bar_colors(card)
+    assert bar == "#3B82F6", bar
+    for t in iter_texts(card):
+        if "600 kcal" in t["text"] and "累積" not in t["text"]:
+            assert t["color"] == "#EF4444", t
+            break
+    else:
+        raise AssertionError("找不到赤字數字")
+
+
+def find_bar_colors(card):
+    """取出累積攝取進度條那一條的顏色。"""
+    for node in iter_boxes(card):
+        if node.get("height") == "8px" and node.get("backgroundColor") not in (None, "#E5E7EB"):
+            return node["backgroundColor"]
+    return None
+
+
+def iter_boxes(node):
+    if isinstance(node, dict):
+        if node.get("type") == "box":
+            yield node
+        for v in node.values():
+            yield from iter_boxes(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from iter_boxes(v)
+
+
+@case
+def test_card_shows_real_pct_when_over():
+    """驗收 4：單日超標時進度條文字顯示真實百分比。"""
+    card = week_card([2400, 2400, 2400, None, None, None, None])
+    label = find_text(card, "7200 / 6000")
+    assert label is not None and "(120%)" in label, label
+
+
+@case
+def test_card_averages():
+    card = week_card([1800, 2200, None, None, None, None, None])
+    assert find_text(card, "2000 kcal（目標 2000）") is not None
+    assert find_text(card, "100 g（目標 160）") is not None
+
+
+@case
+def test_card_completeness_line_names_missing_days():
+    card = week_card([1800, 1900, 2100, 1700, 1850, None, 1500])
+    note = find_text(card, "天有記錄")
+    assert note is not None and "6 / 7" in note, note
+    assert "08/06" in note, note
+
+
+@case
+def test_card_completeness_line_when_full():
+    card = week_card([1800] * 7)
+    note = find_text(card, "天有記錄")
+    assert note is not None and "未列入" not in note, note
+
+
+@case
+def test_card_all_texts_non_empty():
+    """驗收 6：Flex 的 text 一律非空，空字串會讓整則訊息被 LINE 擋成 400。"""
+    for cals in ([1800] * 7, [1800, 1900, 2100, None, None, None, 1500], [0, 0, 0, None, None, None, None]):
+        card = week_card(cals)
+        for t in iter_texts(card):
+            assert str(t.get("text", "")).strip(), f"{cals} → 空字串 text: {t}"
+
+
+@case
+def test_card_survives_sanitize_flex():
+    """走一遍實際送出前的清理，確保結構沒有壞掉。"""
+    card = week_card([1800, 1900, None, None, None, None, 1500])
+    assert app.sanitize_flex(card) == card
+
+
 # ---------- runner ----------
 
 def main():

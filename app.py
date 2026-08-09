@@ -822,6 +822,63 @@ def _week_chart_block(days, target_cal, in_color, over_color):
         {"type": "box", "layout": "horizontal", "spacing": "xs", "margin": "sm", "contents": labels},
     ]
 
+def build_week_flex_card(stats, goal):
+    """近 7 天總結卡片。純渲染，數字全部由 stats 提供，這裡不做任何查詢或推算。"""
+    goal_disp = GOAL_MAP_TO_DISP.get(goal, goal) or "減脂"
+    # 增肌的人「沒吃到」才是問題，好壞方向與減脂相反。這一組顏色同時餵給進度條與直條圖，
+    # 否則同一張卡片上會出現「藍色代表沒吃到、綠色也代表沒吃到」的矛盾。
+    gaining = goal == "muscle_gain"
+    in_color, over_color = ("#3B82F6", "#27AE60") if gaining else ("#27AE60", "#EF4444")
+
+    diff = stats["diff"]
+    if diff == 0:
+        diff_label, diff_value, diff_color = "累積差額", "持平", "#6B7280"
+    elif diff < 0:
+        diff_label, diff_value = "累積赤字", f"{abs(diff)} kcal"
+        diff_color = "#EF4444" if gaining else "#27AE60"
+    else:
+        diff_label, diff_value = "累積盈餘", f"{diff} kcal"
+        diff_color = "#27AE60" if gaining else "#EF4444"
+
+    missing = [d["date"][5:].replace("-", "/") for d in stats["days"] if not d["logged"]]
+    note = f"{stats['logged_days']} / {WEEK_DAYS} 天有記錄"
+    if missing:
+        note += f"，{'、'.join(missing)} 未列入計算"
+    note += "。"
+
+    body = [
+        {"type": "text", "text": f"熱量達標 {stats['on_target_days']} / {stats['logged_days']} 天",
+         "size": "sm", "weight": "bold", "color": "#1F2937"},
+        *_week_chart_block(stats["days"], stats["target_cal"], in_color, over_color),
+        {"type": "separator", "margin": "lg"},
+        _progress_bar_block("累積攝取", stats["actual_intake"], stats["should_intake"], "kcal", in_color, over_color),
+        {
+            "type": "box", "layout": "horizontal", "margin": "md", "contents": [
+                {"type": "text", "text": diff_label, "size": "sm", "weight": "bold", "color": "#374151"},
+                {"type": "text", "text": diff_value, "size": "sm", "weight": "bold", "color": diff_color, "align": "end"}
+            ]
+        },
+        {"type": "separator", "margin": "lg"},
+        _kv_row("平均每日", f"{stats['avg_cal']} kcal（目標 {stats['target_cal']}）"),
+        _kv_row("平均蛋白質", f"{stats['avg_protein']} g（目標 {stats['target_protein']}）"),
+        {"type": "separator", "margin": "lg"},
+        {"type": "text", "text": note, "size": "xs", "color": "#9CA3AF", "margin": "md", "wrap": True},
+    ]
+
+    start = stats["start_date"][5:].replace("-", "/")
+    end = stats["end_date"][5:].replace("-", "/")
+    return {
+        "type": "bubble", "size": "mega",
+        "header": {
+            "type": "box", "layout": "vertical", "backgroundColor": CARD_HEADER_BG, "paddingAll": "lg",
+            "contents": [
+                {"type": "text", "text": "🦴 近 7 天總結", "weight": "bold", "color": "#FFFFFF", "size": "md"},
+                {"type": "text", "text": f"{start}～{end} ｜ {goal_disp}", "color": CARD_HEADER_SUB, "size": "xs", "margin": "xs"}
+            ]
+        },
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "lg", "contents": body}
+    }
+
 def build_weight_flex_card(rows):
     """體重趨勢卡片。rows 由舊到新，至少一筆。"""
     weights = [float(r["weight_kg"]) for r in rows]
