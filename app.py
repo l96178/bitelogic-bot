@@ -207,6 +207,18 @@ def calculate_precise_targets(weight_kg, height_cm, age, gender, goal, activity_
     _, _, target_cal, target_protein = calculate_metabolic_profile(weight_kg, height_cm, age, gender, goal, activity_level, meal_pattern)
     return target_cal, target_protein
 
+def profile_tdee(profile):
+    """從 profile 推回維持熱量。
+
+    TDEE 沒有存進 profiles（只存了推導後的 target_calories），但卡片上需要它 ——
+    target 已經內含赤字或盈餘，只看 target 分不出「超過計畫」和「真的會變胖」。
+    每次即時算比多開一個欄位省事，公式本來就是純函式，個人檔案卡片也是這樣做的。"""
+    raw = profile.get("raw_profile_text") or ""
+    _, tdee, _, _ = calculate_metabolic_profile(
+        profile.get("weight_kg"), profile.get("height_cm"), get_effective_age(profile),
+        profile.get("gender") or "男", profile.get("goal"), raw, raw)
+    return tdee
+
 # 卡片 header 的配色。曾試過改成栗棕色呼應 Coco 的毛色，實際看過後改回深板岩灰。
 # 進度條的綠/紅、體重箭頭的綠/紅是語意色（在額度內 vs 超標、下降 vs 上升），任何情況都不要動 ——
 # 換成暖色會讓「超標」那一刻的顏色跳變被鈍化。
@@ -373,7 +385,84 @@ def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF
         ]
     }
 
-def build_today_card(meals, cals, protein, target_cal, target_protein, goal, last_logged_info=None, info_label="成功寫入飲食紀錄"):
+BAR_TRACK = "#E5E7EB"     # 未填滿的底色
+BAR_MARK = "#1F2937"      # 刻度線；壓在灰底或彩色段上都看得見
+BAR_WARN = "#F59E0B"      # 中間地帶：超過計畫，但還沒到會變胖的程度
+
+def _calorie_range_bar_block(label, current, target, tdee, goal=None):
+    """熱量條：0 到「目標與維持熱量的較大者」，較小的那個畫成刻度線。
+
+    只跟 target 比的話，一條紅色進度條同時代表「超過計畫 30 大卡」和「今天會變胖」，
+    但這兩件事差很多。把維持熱量一起畫進來，中間那段就有地方放：
+    超過計畫、還沒超過維持熱量 —— 沒照計畫，但今天仍在減脂。
+
+    上界取 max 是因為增肌的目標是 TDEE×1.1，比維持熱量還高；寫死「100% = TDEE」
+    會讓目標刻度掉到條子外面。取 max 之後兩種目標共用同一套邏輯：
+      減脂：終點是維持熱量，刻度在目標（約 80%）
+      增肌：終點是目標，刻度在維持熱量（約 91%）
+
+    回傳與 _progress_bar_block 同構（標題列 + 條子 + 說明列），可以直接互換。
+    """
+    target, tdee = int(target or 0), int(tdee or 0)
+    upper = max(target, tdee)
+    mark = min(target, tdee)
+    if upper <= 0:                                  # 檔案壞掉時退回原本的單一基準條，不要炸掉整張卡
+        return _progress_bar_block(label, current, target or 1, "kcal", "#27AE60")
+
+    current = max(0, int(current))
+    pct = int(current * 100 / upper)
+    filled = min(current, upper)
+    over = current > upper
+
+    # 刻度線之前／之後各自的「已填滿」與「未填滿」，四段拼成整條。
+    # 用 kcal 數值本身當 flex 比例，不必先換算百分比，也就沒有四捨五入的累積誤差。
+    lo_fill, lo_gap = min(filled, mark), max(0, mark - filled)
+    hi_fill, hi_gap = max(0, filled - mark), max(0, upper - max(filled, mark))
+    # 兩段的好壞方向跟著目標走：減脂是「刻度以前才對」，增肌相反 ——
+    # 增肌的人待在維持熱量與目標之間才是對的，吃不到維持熱量才是問題。
+    gaining = goal == "muscle_gain"
+    if over:
+        lo_color = hi_color = "#EF4444"
+    elif gaining:
+        lo_color, hi_color = "#3B82F6", "#27AE60"
+    else:
+        lo_color, hi_color = "#27AE60", BAR_WARN
+
+    seg = []
+    for flex, color in ((lo_fill, lo_color), (lo_gap, BAR_TRACK)):
+        if flex > 0:
+            seg.append({"type": "box", "layout": "vertical", "flex": flex, "backgroundColor": color, "contents": []})
+    if 0 < mark < upper:                            # 刻度剛好落在端點時不畫，那條線只會貼著邊緣
+        seg.append({"type": "box", "layout": "vertical", "flex": 0, "width": "3px", "backgroundColor": BAR_MARK, "contents": []})
+    for flex, color in ((hi_fill, hi_color), (hi_gap, BAR_TRACK)):
+        if flex > 0:
+            seg.append({"type": "box", "layout": "vertical", "flex": flex, "backgroundColor": color, "contents": []})
+
+    # 「離目標還有多少、離維持熱量還有多少」，用戶自己判斷要不要再吃。
+    def _gap(name, ref):
+        if current == ref:
+            return f"剛好等於{name}"        # 「離目標還有 0 kcal」是廢話，直接說打平
+        if current > ref:
+            return f"超出{name} {current - ref} kcal"
+        return f"離{name}還有 {ref - current} kcal"
+
+    return {
+        "type": "box", "layout": "vertical",
+        "contents": [
+            {
+                "type": "box", "layout": "horizontal",
+                "contents": [
+                    {"type": "text", "text": label, "size": "sm", "weight": "bold", "color": "#374151", "flex": 0},
+                    {"type": "text", "text": f"{current} / {upper} kcal ({pct}%)", "size": "xs", "align": "end", "color": "#6B7280", "flex": 1}
+                ]
+            },
+            {"type": "box", "layout": "horizontal", "height": "10px", "margin": "sm", "backgroundColor": BAR_TRACK, "contents": seg},
+            {"type": "text", "text": f"{_gap('目標', target)} ｜ {_gap('維持熱量', tdee)}",
+             "size": "xxs", "color": "#9CA3AF", "margin": "xs", "wrap": True},
+        ]
+    }
+
+def build_today_card(meals, cals, protein, target_cal, target_protein, goal, last_logged_info=None, info_label="成功寫入飲食紀錄", tdee=None):
     """統一的「今日」卡片:今日進度查詢、飲食明細、紀錄成功、更正、刪除後全部共用。
     含逐筆清單 + 進度條;last_logged_info 存在時頂部顯示綠色成功框。"""
     goal_disp = GOAL_MAP_TO_DISP.get(goal, goal) or "健康減脂"
@@ -425,13 +514,14 @@ def build_today_card(meals, cals, protein, target_cal, target_protein, goal, las
     else:
         body_contents.append({"type": "text", "text": "今天尚無任何飲食紀錄。", "size": "sm", "color": "#6B7280", "margin": "sm"})
 
-    rem_cal = max(0, target_cal - cals)
+    # 熱量的剩餘額度不再寫在這裡：熱量條下面那行已經同時講了離目標與離維持熱量多遠，
+    # 再寫一次「剩餘額度」只會變成第三個數字。這行只留蛋白質。
     rem_protein = max(0, target_protein - protein)
-    footer_line = f"剩餘額度：{rem_cal} kcal ｜ 蛋白質還差：{rem_protein} g" if cals <= target_cal else f"已超出上限 {cals - target_cal} kcal ｜ 蛋白質還差：{rem_protein} g"
+    footer_line = f"蛋白質還差：{rem_protein} g"
 
     body_contents.extend([
         {"type": "separator", "margin": "lg"},
-        _progress_bar_block("熱量攝取", cals, target_cal, "kcal", "#27AE60"),
+        _calorie_range_bar_block("熱量攝取", cals, target_cal, tdee, goal),
         _progress_bar_block("蛋白質攝取", protein, target_protein, "g", "#3B82F6"),
         {"type": "text", "text": footer_line, "size": "xs", "color": "#6B7280", "margin": "md", "wrap": True}
     ])
@@ -1607,7 +1697,7 @@ def handle_postback(event):
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
 
         meals_now = get_today_meals_list(profile["id"])
-        summary_flex = build_today_card(meals_now, cals=total_c, protein=total_p, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": c, "protein": p})
+        summary_flex = build_today_card(meals_now, cals=total_c, protein=total_p, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile), last_logged_info={"food": food, "cal": c, "protein": p})
         line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(profile["id"])))
 
     elif action == "reroll":
@@ -1692,7 +1782,7 @@ def handle_postback(event):
             sum(int(m.get("protein_g") or 0) for m in meals),
         )
         target_cal, target_protein = profile.get("target_calories") or 2000, profile.get("target_protein_g") or 150
-        summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
+        summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile))
         line_bot_api.reply_message(event.reply_token, [
             TextSendMessage(text=f"已刪除：\n{deleted['food_name']}\n-{deleted['calories']} kcal"),
             flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
@@ -1842,12 +1932,8 @@ def handle_message(event):
         # 近 7 天總結:滾動視窗，含今天。不叫「本週」是因為週一查只會有一天資料，
         # 但指令仍收「本週總結」—— 用戶就是這樣講的。
         if user_msg in ["本週總結", "本周總結", "週報", "周報", "這週如何", "這周如何"]:
-            # TDEE 沒有存在 profiles 裡，跟個人檔案卡片一樣即時從身高體重年齡推回來。
-            # 赤字必須用它當基準，target_cal 已經內含赤字（見 summarize_week_days）。
-            _, tdee, _, _ = calculate_metabolic_profile(
-                profile.get("weight_kg"), profile.get("height_cm"), get_effective_age(profile),
-                profile.get("gender") or "男", profile.get("goal"), raw_p_text, raw_p_text)
-            stats = get_week_stats(user_id, target_cal, target_protein, tdee)
+            # 赤字必須以維持熱量為基準，target_cal 已經內含赤字（見 summarize_week_days）。
+            stats = get_week_stats(user_id, target_cal, target_protein, profile_tdee(profile))
             n = stats["logged_days"]
             if n == 0:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
@@ -1883,7 +1969,7 @@ def handle_message(event):
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
-            today_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
+            today_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile))
             line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 今日進度({len(meals)}筆)", contents=today_flex, quick_reply=get_quick_reply(user_id)))
             return
 
@@ -1894,7 +1980,7 @@ def handle_message(event):
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
-            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
+            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile))
             line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=del_msg), flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))])
             return
 
@@ -1910,7 +1996,7 @@ def handle_message(event):
                 sum(int(m.get("calories") or 0) for m in meals),
                 sum(int(m.get("protein_g") or 0) for m in meals),
             )
-            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"))
+            summary_flex = build_today_card(meals, cals=cals, protein=protein, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile))
             line_bot_api.reply_message(event.reply_token, [
                 TextSendMessage(text="紀錄沒辦法修改。\n\n請在下面卡片上刪除那一筆，再重新輸入一次。"),
                 flex_message(alt_text="🐾 今日進度", contents=summary_flex, quick_reply=get_quick_reply(user_id))
@@ -2003,7 +2089,7 @@ def handle_message(event):
         if msg_type == "log":
             food, cal, protein, total_cal_now, total_protein_now = log_meal_to_supabase(user_id, ai_res)
             meals_now = get_today_meals_list(user_id)
-            summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), last_logged_info={"food": food, "cal": cal, "protein": protein})
+            summary_flex = build_today_card(meals_now, cals=total_cal_now, protein=total_protein_now, target_cal=target_cal, target_protein=target_protein, goal=profile.get("goal"), tdee=profile_tdee(profile), last_logged_info={"food": food, "cal": cal, "protein": protein})
             line_bot_api.reply_message(event.reply_token, flex_message(alt_text=f"🐾 Coco 紀錄成功：{food}", contents=summary_flex, quick_reply=get_quick_reply(user_id)))
         elif msg_type == "recommendation":
             rec_store = ai_res.get("restaurant")

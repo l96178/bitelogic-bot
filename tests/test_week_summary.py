@@ -550,6 +550,122 @@ def test_progress_bar_label_does_not_steal_width():
     assert value["text"] == "5050 / 6045 kcal (83%)", value["text"]
 
 
+# ---------- _calorie_range_bar_block（今日卡片的熱量條）----------
+
+TRACK, MARK, WARN, GREEN, RED = "#E5E7EB", "#1F2937", "#F59E0B", "#27AE60", "#EF4444"
+BLUE = "#3B82F6"
+
+
+def bar_segments(block):
+    """取出熱量條的每一段 (flex, 顏色)。刻度線的 flex 是 0。"""
+    return [(s.get("flex"), s["backgroundColor"]) for s in block["contents"][1]["contents"]]
+
+
+def bar_caption(block):
+    return block["contents"][2]["text"]
+
+
+@case
+def test_calorie_bar_upper_is_tdee_for_fat_loss():
+    """減脂：條子終點是維持熱量，目標畫成刻度線。"""
+    block = app._calorie_range_bar_block("熱量攝取", 1683, 2015, 2519)
+    assert find_text(block, "1683 / 2519 kcal (66%)") is not None, bar_caption(block)
+    segs = bar_segments(block)
+    assert segs == [(1683, GREEN), (332, TRACK), (0, MARK), (504, TRACK)], segs
+
+
+@case
+def test_calorie_bar_between_target_and_tdee_is_amber():
+    """超過計畫但還沒到維持熱量：中間地帶用琥珀色，不是紅色 ——
+    這一段代表「沒照計畫，但今天仍在減脂」，跟「今天會變胖」是兩件事。"""
+    block = app._calorie_range_bar_block("熱量攝取", 2300, 2015, 2519)
+    segs = bar_segments(block)
+    assert segs == [(2015, GREEN), (0, MARK), (285, WARN), (219, TRACK)], segs
+    assert bar_caption(block) == "超出目標 285 kcal ｜ 離維持熱量還有 219 kcal", bar_caption(block)
+
+
+@case
+def test_calorie_bar_over_tdee_is_all_red():
+    """超過維持熱量：整條轉紅，百分比不夾上限。"""
+    block = app._calorie_range_bar_block("熱量攝取", 3000, 2015, 2519)
+    segs = bar_segments(block)
+    assert [c for _, c in segs] == [RED, MARK, RED], segs
+    assert find_text(block, "(119%)") is not None
+    assert bar_caption(block) == "超出目標 985 kcal ｜ 超出維持熱量 481 kcal", bar_caption(block)
+
+
+@case
+def test_calorie_bar_upper_is_target_for_muscle_gain():
+    """增肌的目標是 TDEE×1.1，比維持熱量高 —— 寫死「100% = TDEE」會讓刻度掉到條子外面。
+    上界取 max 之後，增肌自動變成終點是目標、刻度在維持熱量。
+
+    顏色的好壞方向也跟著反過來：吃不到維持熱量是問題（藍），
+    落在維持熱量與目標之間才是對的（綠）。"""
+    block = app._calorie_range_bar_block("熱量攝取", 2600, 2770, 2519, "muscle_gain")
+    assert find_text(block, "2600 / 2770") is not None
+    segs = bar_segments(block)
+    assert segs == [(2519, BLUE), (0, MARK), (81, GREEN), (170, TRACK)], segs
+
+
+@case
+def test_calorie_bar_says_level_instead_of_zero_gap():
+    """剛好打平時說「剛好等於」，不要印「離目標還有 0 kcal」這種廢話。"""
+    assert bar_caption(app._calorie_range_bar_block("熱量攝取", 2015, 2015, 2519)) \
+        == "剛好等於目標 ｜ 離維持熱量還有 504 kcal"
+    assert bar_caption(app._calorie_range_bar_block("熱量攝取", 2519, 2015, 2519)) \
+        == "超出目標 504 kcal ｜ 剛好等於維持熱量"
+
+
+@case
+def test_calorie_bar_no_tick_when_target_equals_tdee():
+    """目標剛好等於維持熱量（被 min_safe_cal 夾上來的情況）時不畫刻度，
+    否則那條線會貼在條子最右緣，看起來像瑕疵。"""
+    block = app._calorie_range_bar_block("熱量攝取", 1000, 2000, 2000)
+    assert MARK not in [c for _, c in bar_segments(block)], bar_segments(block)
+
+
+@case
+def test_calorie_bar_zero_intake_is_all_track():
+    block = app._calorie_range_bar_block("熱量攝取", 0, 2015, 2519)
+    assert [c for _, c in bar_segments(block)] == [TRACK, MARK, TRACK]
+    assert find_text(block, "(0%)") is not None
+
+
+@case
+def test_calorie_bar_falls_back_when_no_targets():
+    """檔案壞到目標與 TDEE 都是 0 時退回單一基準條，不能讓整張卡片炸掉。"""
+    block = app._calorie_range_bar_block("熱量攝取", 500, 0, 0)
+    assert block["type"] == "box"
+    for t in iter_texts(block):
+        assert str(t["text"]).strip(), t
+
+
+@case
+def test_calorie_bar_texts_never_empty():
+    """空字串會讓 LINE 把整則訊息擋成 400。"""
+    for cur, tgt, td in [(0, 2015, 2519), (2015, 2015, 2519), (2519, 2015, 2519),
+                         (9999, 2015, 2519), (1500, 2770, 2519), (0, 0, 0)]:
+        block = app._calorie_range_bar_block("熱量攝取", cur, tgt, td)
+        for t in iter_texts(block):
+            assert str(t["text"]).strip(), (cur, tgt, td, t)
+        assert app.sanitize_flex(block) == block
+
+
+@case
+def test_today_card_uses_the_range_bar():
+    """今日卡片吃到新的熱量條，蛋白質那條維持原樣。"""
+    meals = [{"id": 1, "food_name": "【7-11】雞胸肉沙拉", "calories": 1683, "protein_g": 103}]
+    card = app.build_today_card(meals, 1683, 103, 2015, 160, "fat_loss", tdee=2519)
+    assert find_text(card, "1683 / 2519 kcal") is not None
+    assert find_text(card, "離目標還有 332 kcal") is not None
+    assert find_text(card, "103 / 160 g") is not None
+    # 熱量的剩餘額度已經由熱量條下面那行負責，不要再出現第三個數字
+    assert find_text(card, "剩餘額度") is None
+    for t in iter_texts(card):
+        assert str(t["text"]).strip(), t
+    assert app.sanitize_flex(card) == card
+
+
 # ---------- runner ----------
 
 def main():
