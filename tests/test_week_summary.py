@@ -118,7 +118,7 @@ def fake_days(cals):
 def test_summarize_denominator_is_logged_days():
     """應攝取用「有記錄的天數」當分母，不是 7 —— 否則會算出灌水的假赤字。"""
     days = fake_days([1800, 1900, 2100, 1700, 1850, None, 1500])
-    s = app.summarize_week_days(days, 2000, 160)
+    s = app.summarize_week_days(days, 2000, 160, 2500)
     assert s["logged_days"] == 6, s["logged_days"]
     assert s["should_intake"] == 12000, s["should_intake"]
     assert s["actual_intake"] == 10850, s["actual_intake"]
@@ -129,14 +129,14 @@ def test_summarize_denominator_is_logged_days():
 def test_summarize_on_target_days():
     """單日熱量 <= 目標即為達標；沒記錄的那天不算在分母裡。"""
     days = fake_days([1800, 1900, 2100, 1700, 1850, None, 1500])
-    s = app.summarize_week_days(days, 2000, 160)
+    s = app.summarize_week_days(days, 2000, 160, 2500)
     assert s["on_target_days"] == 5, s["on_target_days"]
 
 
 @case
 def test_summarize_averages_use_logged_days():
     days = fake_days([1800, 2200, None, None, None, None, None])
-    s = app.summarize_week_days(days, 2000, 160)
+    s = app.summarize_week_days(days, 2000, 160, 2500)
     assert s["avg_cal"] == 2000, s["avg_cal"]
     assert s["avg_protein"] == 100, s["avg_protein"]
 
@@ -144,7 +144,7 @@ def test_summarize_averages_use_logged_days():
 @case
 def test_summarize_no_logged_days():
     """完全沒記錄不可除以零。"""
-    s = app.summarize_week_days(fake_days([None] * 7), 2000, 160)
+    s = app.summarize_week_days(fake_days([None] * 7), 2000, 160, 2500)
     assert s["logged_days"] == 0
     assert s["should_intake"] == 0
     assert s["actual_intake"] == 0
@@ -156,15 +156,50 @@ def test_summarize_no_logged_days():
 @case
 def test_summarize_target_fallback():
     """target 為 None 時沿用既有 fallback 2000 / 150。"""
-    s = app.summarize_week_days(fake_days([1800] + [None] * 6), None, None)
+    s = app.summarize_week_days(fake_days([1800] + [None] * 6), None, None, None)
     assert s["target_cal"] == 2000, s["target_cal"]
     assert s["target_protein"] == 150, s["target_protein"]
     assert s["should_intake"] == 2000, s["should_intake"]
 
 
 @case
+def test_summarize_deficit_is_against_tdee_not_target():
+    """赤字要用維持熱量算，不能用目標算。
+
+    目標本身已經內含赤字（減脂是 TDEE×0.8），拿它當基準只回答了「有沒有照計畫吃」。
+    這裡三天各吃 1800、目標 2000、TDEE 2500：
+      對目標的差額 = 5400 - 6000 = -600（依從度，給進度條）
+      對 TDEE 的差額 = 5400 - 7500 = -2100（真正決定瘦不瘦的數字）"""
+    days = fake_days([1800, 1800, 1800] + [None] * 4)
+    s = app.summarize_week_days(days, 2000, 160, 2500)
+    assert s["diff"] == -600, s["diff"]
+    assert s["maintain_intake"] == 7500, s["maintain_intake"]
+    assert s["tdee_diff"] == -2100, s["tdee_diff"]
+    assert s["tdee"] == 2500, s["tdee"]
+
+
+@case
+def test_summarize_hitting_target_exactly_is_still_a_real_deficit():
+    """天天精準吃到目標的人不是「持平」—— 他每天赤字 TDEE-target。
+
+    這正是用 target 當基準會犯的錯：把一週瘦半公斤說成白做工。"""
+    days = fake_days([2000] * 7)
+    s = app.summarize_week_days(days, 2000, 160, 2500)
+    assert s["diff"] == 0, s["diff"]
+    assert s["tdee_diff"] == -3500, s["tdee_diff"]
+
+
+@case
+def test_summarize_tdee_fallback():
+    """算不出 TDEE 時退回 target，至少不會拿 None 去做乘法。"""
+    s = app.summarize_week_days(fake_days([1800] + [None] * 6), 2000, 160, None)
+    assert s["tdee"] == 2000, s["tdee"]
+    assert s["tdee_diff"] == -200, s["tdee_diff"]
+
+
+@case
 def test_summarize_date_bounds():
-    s = app.summarize_week_days(fake_days([1800] * 7), 2000, 160)
+    s = app.summarize_week_days(fake_days([1800] * 7), 2000, 160, 2500)
     assert s["start_date"] == "2026-08-01", s["start_date"]
     assert s["end_date"] == "2026-08-07", s["end_date"]
 
@@ -251,8 +286,8 @@ def test_chart_caption_present_all_zero_week():
 
 # ---------- build_week_flex_card ----------
 
-def week_card(cals, goal="fat_loss", target_cal=2000, target_protein=160):
-    stats = app.summarize_week_days(fake_days(cals), target_cal, target_protein)
+def week_card(cals, goal="fat_loss", target_cal=2000, target_protein=160, tdee=2500):
+    stats = app.summarize_week_days(fake_days(cals), target_cal, target_protein, tdee)
     return app.build_week_flex_card(stats, goal)
 
 
@@ -267,10 +302,13 @@ def test_card_header_and_on_target_line():
 
 @case
 def test_card_deficit_green_for_fat_loss():
-    """減脂的人有赤字是好消息，標綠。"""
+    """減脂的人有赤字是好消息，標綠。
+
+    赤字是對維持熱量算的：6 天實際 10850，維持 6×2500=15000 → 4150。
+    （對目標的差額只有 1150，那是依從度，由進度條負責。）"""
     card = week_card([1800, 1900, 2100, 1700, 1850, None, 1500])
     for t in iter_texts(card):
-        if "1150 kcal" in t["text"]:
+        if "4150 kcal" in t["text"]:
             assert t["color"] == "#27AE60", t
             break
     else:
@@ -280,10 +318,11 @@ def test_card_deficit_green_for_fat_loss():
 
 @case
 def test_card_surplus_red_for_fat_loss():
-    card = week_card([2500, 2500, 2500, None, None, None, None])
+    """吃超過維持熱量才是盈餘：3 天實際 8400，維持 7500 → 900。"""
+    card = week_card([2800, 2800, 2800, None, None, None, None])
     assert find_text(card, "累積盈餘") is not None
     for t in iter_texts(card):
-        if "1500 kcal" in t["text"]:
+        if "900 kcal" in t["text"]:
             assert t["color"] == "#EF4444", t
             break
     else:
@@ -292,8 +331,8 @@ def test_card_surplus_red_for_fat_loss():
 
 @case
 def test_card_diff_zero_is_neutral():
-    """實際攝取剛好等於應攝取:累積差額／持平，中性灰，不偏向任一目標。"""
-    card = week_card([2000] + [None] * 6)
+    """實際攝取剛好等於維持熱量:累積差額／持平，中性灰，不偏向任一目標。"""
+    card = week_card([2500] + [None] * 6)
     assert find_text(card, "累積差額") is not None
     for t in iter_texts(card):
         if t["text"] == "持平":
@@ -310,7 +349,7 @@ def test_card_muscle_gain_flips_colors():
     bar = find_bar_colors(card)
     assert bar == "#3B82F6", bar
     for t in iter_texts(card):
-        if "600 kcal" in t["text"]:
+        if "2100 kcal" in t["text"]:
             assert t["color"] == "#EF4444", t
             break
     else:
@@ -425,7 +464,7 @@ def test_card_completeness_note_flags_partial_today():
         ("2026-08-04", 1700), ("2026-08-05", 1850), ("2026-08-06", 1500),
         (today, 400),
     ])
-    stats = app.summarize_week_days(days, 2000, 160)
+    stats = app.summarize_week_days(days, 2000, 160, 2500)
     card = app.build_week_flex_card(stats, "fat_loss")
     note = find_text(card, "天有記錄")
     assert note is not None and "尚未結束但已計入計算" in note, note

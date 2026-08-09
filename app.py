@@ -691,22 +691,35 @@ WEEK_DAYS = 7
 # 沒有 target 時的保底值，與 handle_message 內的既有 fallback 一致。
 DEFAULT_TARGET_CAL, DEFAULT_TARGET_PROTEIN = 2000, 150
 
-def summarize_week_days(days, target_cal, target_protein):
+def summarize_week_days(days, target_cal, target_protein, tdee):
     """把逐日資料算成近 7 天的彙總。純算術，不查資料庫（所以能用假資料測）。
 
     days 由舊到新，每筆 {date, calories, protein, logged}。
 
     分母一律是「有記錄的天數」而不是 7：沒記錄的那幾天用戶還是有吃，只是沒記，
     用 7 天算應攝取會得到灌水的赤字，讓減脂的人以為自己瘦了。
-    一個假的赤字比沒有赤字更糟。"""
+    一個假的赤字比沒有赤字更糟。
+
+    兩個基準各有各的問題要回答，不能混用：
+
+    - target_cal 已經是扣掉赤字後的計畫值（減脂是 TDEE×0.8）。拿它當基準算出來的是
+      「有沒有照計畫吃」，屬於依從度，給進度條用。
+    - tdee 才是維持體重的熱量。真正決定瘦不瘦的是相對 TDEE 的差額，所以「累積赤字」
+      一定要用它算。拿 target_cal 算赤字的話，每天精準吃到目標的人會看到「持平」，
+      但他實際上每天赤字 TDEE×0.2、一週瘦半公斤 —— 剛好把成效說成白做工。
+    """
     target_cal = target_cal or DEFAULT_TARGET_CAL
     target_protein = target_protein or DEFAULT_TARGET_PROTEIN
+    # calculate_metabolic_profile 對缺漏的身高體重年齡都有預設值，實務上一定算得出 TDEE；
+    # 這行只是不讓 None 一路傳進乘法。
+    tdee = int(tdee) if tdee else target_cal
 
     logged = [d for d in days if d["logged"]]
     logged_days = len(logged)
     actual = sum(int(d["calories"]) for d in logged)
     protein_sum = sum(int(d["protein"]) for d in logged)
     should = logged_days * target_cal
+    maintain = logged_days * tdee
 
     return {
         "days": days,
@@ -715,15 +728,18 @@ def summarize_week_days(days, target_cal, target_protein):
         "actual_intake": actual,
         "should_intake": should,
         "diff": actual - should,
+        "maintain_intake": maintain,
+        "tdee_diff": actual - maintain,
         "avg_cal": round(actual / logged_days) if logged_days else 0,
         "avg_protein": round(protein_sum / logged_days) if logged_days else 0,
         "target_cal": target_cal,
         "target_protein": target_protein,
+        "tdee": tdee,
         "start_date": days[0]["date"],
         "end_date": days[-1]["date"],
     }
 
-def get_week_stats(user_id, target_cal, target_protein):
+def get_week_stats(user_id, target_cal, target_protein, tdee):
     """近 7 天（含今天）的飲食彙總。兩次查詢，不做任何渲染。
 
     「有記錄」的定義是該日至少有一筆 meal_items —— 只開了 daily_logs 卻沒寫入
@@ -752,7 +768,7 @@ def get_week_stats(user_id, target_cal, target_protein):
             slot["logged"] = True
 
     days = [{"date": d, **totals[d]} for d in dates]
-    return summarize_week_days(days, target_cal, target_protein)
+    return summarize_week_days(days, target_cal, target_protein, tdee)
 
 def get_weight_rows(user_id, limit=8):
     """近期體重紀錄，由舊到新。"""
@@ -847,7 +863,10 @@ def build_week_flex_card(stats, goal):
     gaining = goal == "muscle_gain"
     in_color, over_color = ("#3B82F6", "#27AE60") if gaining else ("#27AE60", "#EF4444")
 
-    diff = stats["diff"]
+    # 赤字用 TDEE 當基準，不是用 target_cal —— target 已經內含赤字（減脂是 TDEE×0.8），
+    # 拿它算等於在問「有沒有照計畫吃」，而那件事上面的進度條已經回答了。
+    # 決定瘦不瘦的是相對維持熱量的差額，所以這一行必須是 tdee_diff。
+    diff = stats["tdee_diff"]
     if diff == 0:
         diff_label, diff_value, diff_color = "累積差額", "持平", "#6B7280"
     elif diff < 0:
@@ -884,6 +903,10 @@ def build_week_flex_card(stats, goal):
                 {"type": "text", "text": diff_value, "size": "sm", "weight": "bold", "color": diff_color, "align": "end"}
             ]
         },
+        # 卡片上同時出現兩個基準（進度條的目標 2015、赤字的維持熱量 2519），不講清楚
+        # 會被當成算錯。這行就是在回答「為什麼赤字比進度條的缺口大那麼多」。
+        {"type": "text", "text": f"以維持熱量 {stats['tdee']} kcal/天 為基準", "size": "xxs",
+         "color": "#9CA3AF", "align": "end", "margin": "xs"},
         {"type": "separator", "margin": "lg"},
         _kv_row("平均每日", f"{stats['avg_cal']} kcal（目標 {stats['target_cal']}）"),
         _kv_row("平均蛋白質", f"{stats['avg_protein']} g（目標 {stats['target_protein']}）"),
@@ -1815,7 +1838,12 @@ def handle_message(event):
         # 近 7 天總結:滾動視窗，含今天。不叫「本週」是因為週一查只會有一天資料，
         # 但指令仍收「本週總結」—— 用戶就是這樣講的。
         if user_msg in ["本週總結", "本周總結", "週報", "周報", "這週如何", "這周如何"]:
-            stats = get_week_stats(user_id, target_cal, target_protein)
+            # TDEE 沒有存在 profiles 裡，跟個人檔案卡片一樣即時從身高體重年齡推回來。
+            # 赤字必須用它當基準，target_cal 已經內含赤字（見 summarize_week_days）。
+            _, tdee, _, _ = calculate_metabolic_profile(
+                profile.get("weight_kg"), profile.get("height_cm"), get_effective_age(profile),
+                profile.get("gender") or "男", profile.get("goal"), raw_p_text, raw_p_text)
+            stats = get_week_stats(user_id, target_cal, target_protein, tdee)
             n = stats["logged_days"]
             if n == 0:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(
