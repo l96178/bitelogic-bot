@@ -386,6 +386,23 @@ def test_card_survives_sanitize_flex():
     assert app.sanitize_flex(card) == card
 
 
+# ---------- 入口 ----------
+
+@case
+def test_quick_reply_has_week_button():
+    """user_id=None 時 get_quick_reply 不查資料庫，可離線驗。"""
+    labels = [b.action.label for b in app.get_quick_reply().items]
+    assert "本週總結" in labels, labels
+    assert len(labels) <= 13, labels          # LINE 上限
+    assert all(len(l) <= 20 for l in labels), labels
+
+
+@case
+def test_capabilities_mentions_week_summary():
+    assert "本週總結" in app.BOT_CAPABILITIES, app.BOT_CAPABILITIES
+    assert "週報" not in app.BOT_CAPABILITIES.split("尚未開放")[1], app.BOT_CAPABILITIES
+
+
 # ---------- runner ----------
 
 def main():
