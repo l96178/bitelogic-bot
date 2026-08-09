@@ -91,6 +91,15 @@ def test_progress_bar_zero_target():
     assert find_text(block, "(0%)") is not None
 
 
+@case
+def test_progress_bar_at_target_is_not_over_color():
+    """剛好打在目標上是達標（卡片的達標定義是 <= target），不是超標；
+    上色門檻若用 >= 100 會讓灰字寫著「持平／達標」的同時把柱子塗成超標紅。"""
+    block = app._progress_bar_block("熱量攝取", 2000, 2000, "kcal", "#27AE60")
+    bar = block["contents"][1]["contents"][0]
+    assert bar["backgroundColor"] == "#27AE60", bar["backgroundColor"]
+
+
 # ---------- summarize_week_days ----------
 
 def fake_days(cals):
@@ -216,6 +225,28 @@ def test_chart_labels_are_month_day():
     labels = [t["text"] for t in iter_texts(app._week_chart_block(days, 2000, "#27AE60", "#EF4444")[1])]
     assert labels[0] == "08/01", labels
     assert labels[-1] == "08/07", labels
+
+
+@case
+def test_chart_caption_present_normal_week():
+    """[1200, 1250, 1300] 對 2000 大卡目標而言天天吃不夠，但柱子會被拉到接近滿格 ——
+    caption 要把換算基準（區間最高單日）印出來，讀者才不會誤會柱子代表「吃很多」。"""
+    days = fake_days([1200, 1250, 1300, None, None, None, None])
+    blocks = app._week_chart_block(days, 2000, "#27AE60", "#EF4444")
+    caption = blocks[-1]["text"]
+    assert caption.strip(), "caption 不可為空字串，空字串會讓 LINE 把整則訊息擋成 400"
+    assert "1300" in caption, caption
+
+
+@case
+def test_chart_caption_present_all_zero_week():
+    """peak 為 0（沒有任何一天記到熱量）時，caption 不能印出「以 0 kcal 為滿格」這種
+    沒有意義的敘述，但也絕不能是空字串。"""
+    days = fake_days([0] * 7)
+    blocks = app._week_chart_block(days, 2000, "#27AE60", "#EF4444")
+    caption = blocks[-1]["text"]
+    assert caption.strip(), "caption 不可為空字串"
+    assert "0 kcal 為滿格" not in caption, caption
 
 
 # ---------- build_week_flex_card ----------
@@ -368,6 +399,48 @@ def test_card_completeness_line_when_full():
     card = week_card([1800] * 7)
     note = find_text(card, "天有記錄")
     assert note is not None and "未列入" not in note, note
+    assert "尚未結束" not in note, note
+
+
+def fake_days_custom(dates_cals):
+    """跟 fake_days 一樣，但日期由呼叫端指定 —— 用來組出最後一天剛好等於
+    get_today_str() 的 fixture，藉此驅動「今天尚未結束」那條備註而不必凍結時鐘。"""
+    out = []
+    for date, c in dates_cals:
+        if c is None:
+            out.append({"date": date, "calories": 0, "protein": 0, "logged": False})
+        else:
+            out.append({"date": date, "calories": c, "protein": c // 20, "logged": True})
+    return out
+
+
+@case
+def test_card_completeness_note_flags_partial_today():
+    """今天只要記過一餐就整天算入 should_intake（見 summarize_week_days 的算法，
+    這是刻意保留、不能改的行為），但畫面要說清楚今天還沒過完，
+    不然使用者會把「還沒吃完的一天」誤讀成「已經確定的赤字」。"""
+    today = app.get_today_str()
+    days = fake_days_custom([
+        ("2026-08-01", 1800), ("2026-08-02", 1900), ("2026-08-03", 2100),
+        ("2026-08-04", 1700), ("2026-08-05", 1850), ("2026-08-06", 1500),
+        (today, 400),
+    ])
+    stats = app.summarize_week_days(days, 2000, 160)
+    card = app.build_week_flex_card(stats, "fat_loss")
+    note = find_text(card, "天有記錄")
+    assert note is not None and "尚未結束但已計入計算" in note, note
+    assert today[5:].replace("-", "/") in note, note
+
+
+@case
+def test_card_completeness_note_no_clause_when_last_day_not_today():
+    """既有 fixture 的最後一天固定是 2026-08-07，跟今天（由環境決定）對不上，
+    不該出現「尚未結束」那句 —— 確認新增的分支沒有誤觸發在既有測資上。"""
+    today = app.get_today_str()
+    assert today != "2026-08-07", "fixture 日期意外撞到今天，這個測試失去意義"
+    card = week_card([1800, 1900, 2100, 1700, 1850, None, 1500])
+    note = find_text(card, "天有記錄")
+    assert note is not None and "尚未結束" not in note, note
 
 
 @case

@@ -350,7 +350,7 @@ def build_profile_flex_card(profile):
 def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF4444"):
     # 顯示用的百分比不夾上限：夾住會讓超標的 116% 印成 100%，剛好抹掉最該被看見的數字。
     # 條寬另外夾 —— 那是版面限制，不是資訊。
-    pct = max(0, int(current * 100 / target)) if target > 0 else 0  # 先乘後除,避免浮點誤差把 116% 截成 115%
+    pct = max(0, int(current * 100 / target)) if target > 0 else 0  # 先乘後除，避免浮點誤差把 116% 截成 115%
     width = min(100, max(3, pct))
     return {
         "type": "box", "layout": "vertical",
@@ -364,7 +364,9 @@ def _progress_bar_block(label, current, target, unit, bar_color, over_color="#EF
             },
             {
                 "type": "box", "layout": "vertical", "backgroundColor": "#E5E7EB", "height": "8px", "cornerRadius": "4px", "margin": "sm",
-                "contents": [{"type": "box", "layout": "vertical", "backgroundColor": over_color if pct >= 100 else bar_color, "height": "8px", "width": f"{width}%", "cornerRadius": "4px", "contents": []}]
+                # 剛好 100% 是達標（卡片的達標定義是 <= target），不是超標；上色門檻要跟著這個定義走，
+                # 否則會出現「灰字寫著持平／達標，柱子卻塗成超標紅」的自相矛盾。
+                "contents": [{"type": "box", "layout": "vertical", "backgroundColor": over_color if pct > 100 else bar_color, "height": "8px", "width": f"{width}%", "cornerRadius": "4px", "contents": []}]
             }
         ]
     }
@@ -737,9 +739,12 @@ def get_week_stats(user_id, target_cal, target_protein):
         meals = supabase.table("meal_items").select("daily_log_id, calories, protein_g") \
             .in_("daily_log_id", list(id_to_date)).execute()
         for m in (meals.data or []):
-            slot = totals.get(id_to_date.get(m["daily_log_id"]))
-            if slot is None:
-                continue
+            # 直接索引，不 .get()-and-skip：daily_log_id 已經被上面的 .in_() 篩過，
+            # 一定在 id_to_date 裡；log_date 也理當是 totals 的合法 key。
+            # 萬一哪天 log_date 的格式跑掉（欄位型別改了、PostgREST 序列化變了），
+            # 寧可讓這裡炸出 KeyError 被外層 except 接住、寫進 log，
+            # 也不要靜默漏記，讓用戶看到一句查不出原因的「近 7 天還沒有任何記錄」。
+            slot = totals[id_to_date[m["daily_log_id"]]]
             slot["calories"] += int(m.get("calories") or 0)
             slot["protein"] += int(m.get("protein_g") or 0)
             slot["logged"] = True
@@ -806,7 +811,7 @@ def _week_chart_block(days, target_cal, in_color, over_color):
             flex, color = CHART_UNLOGGED_FLEX, CHART_GREY
         else:
             pct = int(round(d["calories"] / peak * 100)) if peak > 0 else CHART_MIN_FLEX
-            flex = min(100, max(CHART_MIN_FLEX, pct))
+            flex = min(100, max(CHART_MIN_FLEX, pct))  # 留最低高度，否則吃最少的那天看不到柱子
             color = over_color if d["calories"] > target_cal else in_color
         cols.append({
             "type": "box", "layout": "vertical", "contents": [
@@ -818,9 +823,18 @@ def _week_chart_block(days, target_cal, in_color, over_color):
         labels.append({"type": "text", "text": d["date"][5:].replace("-", "/"),
                        "size": "xxs", "color": CHART_GREY, "align": "center", "flex": 1})
 
+    # 柱高是相對於「這週最高單日」的比例，不是絕對值 —— [1200, 1250, 1300] 對 2000 大卡的
+    # 目標來說天天吃不夠，但柱子會被拉到接近滿格，看起來像吃很多。跟 _weight_chart_block
+    # 一樣，把換算基準印出來，不能讓刻度只能意會不能言傳。
+    # peak 為 0（這週沒有任何一天有記錄熱量）時換一句話，不能印出「以 0 kcal 為滿格」這種
+    # 沒有意義的敘述，也不能是空字串 —— 空字串會讓 LINE 把整則訊息擋成 400。
+    peak_caption = (f"柱高以區間內最高單日 {peak} kcal 為滿格（縱軸從 0 起算）" if peak > 0
+                    else "本週尚無已記錄的熱量，柱高僅為示意、無比例可參考")
+
     return [
         {"type": "box", "layout": "horizontal", "height": "96px", "spacing": "xs", "margin": "lg", "contents": cols},
         {"type": "box", "layout": "horizontal", "spacing": "xs", "margin": "sm", "contents": labels},
+        {"type": "text", "text": peak_caption, "size": "xxs", "color": "#9CA3AF", "align": "center", "margin": "sm"},
     ]
 
 def build_week_flex_card(stats, goal):
@@ -845,6 +859,15 @@ def build_week_flex_card(stats, goal):
     note = f"{stats['logged_days']} / {WEEK_DAYS} 天有記錄"
     if missing:
         note += f"，{'、'.join(missing)} 未列入計算"
+    # 今天只要記過一餐就會被算成「有記錄」的一整天，跟已經過完的六天一樣份量地
+    # 計入 should_intake —— 這是刻意的算法（見 summarize_week_days），但畫面上要說清楚
+    # 今天還沒過完，免得用戶把「還沒吃完的一天」誤讀成「已經確定的赤字」。
+    # 用 end_date 對照 get_today_str() 判斷最後一天是不是今天：build_week_flex_card
+    # 是純渲染函式不查資料庫，這是它唯一能問到「現在幾號」的地方。
+    last_day = stats["days"][-1]
+    if last_day["logged"] and stats["end_date"] == get_today_str():
+        today_disp = last_day["date"][5:].replace("-", "/")
+        note += f"，{today_disp} 尚未結束但已計入計算"
     note += "。"
 
     body = [
